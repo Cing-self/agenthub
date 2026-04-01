@@ -21,6 +21,8 @@ export function getAgentTone(agent: DetectedAgent | undefined): AgentTone {
     };
   }
 
+  const runtimeFamily = agent.runtime_family || agent.runtime_profile?.runtime_family || agent.agent_type;
+
   if (agent.id === "openclaw" || agent.id === "autoclaw") {
     return {
       glow: "bg-orange-400/28 dark:bg-orange-500/16",
@@ -41,7 +43,7 @@ export function getAgentTone(agent: DetectedAgent | undefined): AgentTone {
     };
   }
 
-  if (agent.agent_type === "claude-code") {
+  if (runtimeFamily === "claude-code") {
     return {
       glow: "bg-sky-300/26 dark:bg-sky-500/14",
       hero: "border-sky-200/70 bg-[linear-gradient(135deg,rgba(247,252,255,0.96),rgba(232,245,255,0.72))] dark:border-sky-500/14 dark:bg-[linear-gradient(135deg,rgba(25,42,58,0.56),rgba(18,20,25,0.64))]",
@@ -51,7 +53,7 @@ export function getAgentTone(agent: DetectedAgent | undefined): AgentTone {
     };
   }
 
-  if (agent.agent_type === "codex") {
+  if (runtimeFamily === "codex") {
     return {
       glow: "bg-amber-300/26 dark:bg-amber-500/14",
       hero: "border-amber-200/70 bg-[linear-gradient(135deg,rgba(255,252,245,0.96),rgba(252,240,216,0.75))] dark:border-amber-500/14 dark:bg-[linear-gradient(135deg,rgba(58,43,25,0.58),rgba(23,20,17,0.64))]",
@@ -61,7 +63,7 @@ export function getAgentTone(agent: DetectedAgent | undefined): AgentTone {
     };
   }
 
-  if (agent.agent_type === "opencode") {
+  if (runtimeFamily === "opencode") {
     return {
       glow: "bg-emerald-300/26 dark:bg-emerald-500/14",
       hero: "border-emerald-200/70 bg-[linear-gradient(135deg,rgba(247,255,251,0.96),rgba(231,248,239,0.74))] dark:border-emerald-500/14 dark:bg-[linear-gradient(135deg,rgba(22,53,43,0.58),rgba(17,23,21,0.64))]",
@@ -81,13 +83,14 @@ export function getAgentTone(agent: DetectedAgent | undefined): AgentTone {
 }
 
 export function getAgentRuntimeLabel(agent: DetectedAgent) {
+  const runtimeFamily = agent.runtime_family || agent.runtime_profile?.runtime_family || agent.agent_type;
   if (agent.id === "workbuddy") return "Workspace Copilot";
   if (agent.id === "qclaw") return "QClaw Runtime";
   if (agent.id === "autoclaw") return "AutoClaw Runtime";
-  if (agent.agent_type === "openclaw") return "OpenClaw Gateway";
-  if (agent.agent_type === "claude-code") return "Claude Code Runtime";
-  if (agent.agent_type === "codex") return "Codex CLI";
-  if (agent.agent_type === "opencode") return "OpenCode Runtime";
+  if (runtimeFamily === "openclaw") return "OpenClaw Gateway";
+  if (runtimeFamily === "claude-code") return "Claude SDK Runtime";
+  if (runtimeFamily === "codex") return "Codex CLI";
+  if (runtimeFamily === "opencode") return "OpenCode Runtime";
   return "Agent Runtime";
 }
 
@@ -101,6 +104,8 @@ export function getAgentSummary(agent: DetectedAgent) {
       return agent.details.has_skills ? "skills enabled · local config" : "CLI ready · minimal setup";
     case "opencode":
       return `${agent.details.has_agents ? "custom agents" : "base agents"} · ${agent.details.has_skills ? "skills on" : "skills off"}`;
+    case "custom-agent":
+      return `${getAgentRuntimeLabel(agent)} · ${agent.details.auth_source || "runtime auth"}${agent.details.default_model ? ` · ${agent.details.default_model}` : ""}`;
     default:
       return "ready for routing";
   }

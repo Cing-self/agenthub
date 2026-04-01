@@ -24,45 +24,68 @@ export default function OverviewTab({ agent, config }: Props) {
   // Get variant from details
   const variant =
     agent.details.type === "openclaw" ? agent.details.variant : agent.agent_type;
+  const runtimeFamily =
+    agent.runtime_family ?? agent.runtime_profile?.runtime_family ?? agent.agent_type;
+
+  const cards = [
+    <Card key="variant" title="Variant" value={variant} />,
+    <Card key="runtime" title="Runtime" value={runtimeFamily} />,
+    <Card key="home" title="Home" value={agent.home_dir} />,
+    <Card
+      key="status"
+      title="Status"
+      value={agent.running ? `Running (PID ${agent.pid})` : "Stopped"}
+      highlight={agent.running ? "green" : "red"}
+    />,
+  ];
+
+  if (meta?.lastTouchedVersion != null) {
+    cards.push(<Card key="version" title="Version" value={String(meta.lastTouchedVersion)} />);
+  }
+
+  if (agent.process_name) {
+    cards.push(<Card key="process" title="Process" value={agent.process_name} />);
+  }
+
+  if (agent.details.type === "custom-agent") {
+    cards.push(
+      <Card key="auth" title="Auth" value={agent.details.auth_source || "runtime default"} />,
+      <Card key="model" title="Default Model" value={agent.details.default_model || "runtime default"} />,
+      <Card key="based-on" title="Based On" value={agent.details.based_on_runtime} />,
+    );
+  } else {
+    cards.push(
+      <Card key="agents" title="Agents" value={`${agentList.length} configured`} />,
+      <Card
+        key="channels"
+        title="Channels"
+        value={enabledChannels.map(([k]) => k).join(", ") || "None"}
+      />,
+      <Card key="plugins" title="Plugins" value={`${enabledPlugins.length} enabled`} />,
+    );
+  }
+
+  if (gateway?.port != null) {
+    cards.push(<Card key="gateway-port" title="Gateway Port" value={String(gateway.port)} />);
+  }
+
+  if (gateway?.mode != null) {
+    cards.push(<Card key="gateway-mode" title="Gateway Mode" value={String(gateway.mode)} />);
+  }
+
+  if (agent.details.type === "openclaw") {
+    cards.push(
+      <Card
+        key="workspaces"
+        title="Workspaces"
+        value={`${agent.details.workspace_count} workspace(s)`}
+      />,
+    );
+  }
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-      <Card title="Variant" value={variant} />
-      <Card title="Home" value={agent.home_dir} />
-      <Card
-        title="Status"
-        value={agent.running ? `Running (PID ${agent.pid})` : "Stopped"}
-        highlight={agent.running ? "green" : "red"}
-      />
-      {meta?.lastTouchedVersion && (
-        <Card title="Version" value={String(meta.lastTouchedVersion)} />
-      )}
-      {agent.process_name && (
-        <Card title="Process" value={agent.process_name} />
-      )}
-      <Card title="Agents" value={`${agentList.length} configured`} />
-      <Card
-        title="Channels"
-        value={enabledChannels.map(([k]) => k).join(", ") || "None"}
-      />
-      <Card
-        title="Plugins"
-        value={`${enabledPlugins.length} enabled`}
-      />
-      {gateway?.port && (
-        <Card title="Gateway Port" value={String(gateway.port)} />
-      )}
-      {gateway?.mode && (
-        <Card title="Gateway Mode" value={String(gateway.mode)} />
-      )}
-      {agent.details.type === "openclaw" && (
-        <>
-          <Card
-            title="Workspaces"
-            value={`${agent.details.workspace_count} workspace(s)`}
-          />
-        </>
-      )}
+      {cards}
     </div>
   );
 }

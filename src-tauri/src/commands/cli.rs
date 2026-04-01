@@ -1,5 +1,7 @@
-use serde::Serialize;
-use std::process::Command;
+use serde::{Deserialize, Serialize};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::process::{Command, Stdio};
+use tauri::Emitter;
 
 #[derive(Serialize)]
 pub struct CliResult {
@@ -7,6 +9,34 @@ pub struct CliResult {
     pub stderr: String,
     pub success: bool,
     pub json: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct CustomRuntimeProfileConfig {
+    runtime_family: String,
+}
+
+#[derive(Deserialize)]
+struct CustomAgentConfig {
+    id: String,
+    runtime_profile: CustomRuntimeProfileConfig,
+}
+
+fn with_augmented_path(cmd: &mut Command) {
+    if let Some(home) = dirs::home_dir() {
+        let npm_bin = home.join(".npm-global/bin");
+        let brew_bin = std::path::PathBuf::from("/opt/homebrew/bin");
+        let current_path = std::env::var("PATH").unwrap_or_default();
+        cmd.env(
+            "PATH",
+            format!(
+                "{}:{}:{}",
+                npm_bin.to_string_lossy(),
+                brew_bin.to_string_lossy(),
+                current_path
+            ),
+        );
+    }
 }
 
 
@@ -61,17 +91,11 @@ pub async fn github_oauth_login(client_id: String, client_secret: String) -> Res
 /// Run a shell command and return output
 #[tauri::command]
 pub async fn run_shell_cmd(command: String, timeout_secs: Option<u64>) -> Result<CliResult, String> {
-    let timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(120));
+    let _timeout = std::time::Duration::from_secs(timeout_secs.unwrap_or(120));
 
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(&command);
-
-    if let Some(home) = dirs::home_dir() {
-        let npm_bin = home.join(".npm-global/bin");
-        let brew_bin = std::path::PathBuf::from("/opt/homebrew/bin");
-        let current_path = std::env::var("PATH").unwrap_or_default();
-        cmd.env("PATH", format!("{}:{}:{}", npm_bin.to_string_lossy(), brew_bin.to_string_lossy(), current_path));
-    }
+    with_augmented_path(&mut cmd);
 
     let output = cmd.output()
         .map_err(|e| format!("Failed to run command: {}", e))?;
@@ -85,6 +109,116 @@ pub async fn run_shell_cmd(command: String, timeout_secs: Option<u64>) -> Result
         success: output.status.success(),
         json: serde_json::from_str(&stdout).ok(),
     })
+}
+
+#[tauri::command]
+pub async fn run_claude_sdk_cmd(window: tauri::Window, payload: serde_json::Value) -> Result<CliResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let project_root = manifest_dir
+            .parent()
+            .ok_or("Cannot determine project root")?
+            .to_path_buf();
+        let script_path = manifest_dir.join("scripts").join("claude-runtime.mjs");
+
+        if !script_path.exists() {
+            return Err(format!("Claude runtime script not found: {}", script_path.display()));
+        }
+
+        let mut cmd = Command::new("node");
+        cmd.arg(script_path);
+        cmd.current_dir(&project_root);
+        cmd.stdin(Stdio::piped());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        with_augmented_path(&mut cmd);
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to spawn Claude SDK runtime: {}", e))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            let payload_str = serde_json::to_string(&payload)
+                .map_err(|e| format!("Failed to serialize Claude runtime payload: {}", e))?;
+            stdin
+                .write_all(payload_str.as_bytes())
+                .map_err(|e| format!("Failed to write Claude runtime payload: {}", e))?;
+        }
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or("Failed to capture Claude runtime stdout")?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or("Failed to capture Claude runtime stderr")?;
+
+        let stderr_handle = std::thread::spawn(move || {
+            let mut reader = BufReader::new(stderr);
+            let mut buffer = String::new();
+            let _ = reader.read_to_string(&mut buffer);
+            buffer
+        });
+
+        let mut stdout_lines = Vec::new();
+        let mut final_json: Option<serde_json::Value> = None;
+
+        for line in BufReader::new(stdout).lines() {
+            let line = line.map_err(|e| format!("Failed to read Claude runtime stdout: {}", e))?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            stdout_lines.push(trimmed.to_string());
+
+            let parsed = match serde_json::from_str::<serde_json::Value>(trimmed) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+
+            match parsed.get("type").and_then(|value| value.as_str()) {
+                Some("partial") => {
+                    let _ = window.emit("agenthub://runtime-stream", &parsed);
+                }
+                Some("final") => {
+                    if let Some(object) = parsed.as_object() {
+                        let mut next = serde_json::Map::new();
+                        for (key, value) in object {
+                            if key != "type" {
+                                next.insert(key.clone(), value.clone());
+                            }
+                        }
+                        final_json = Some(serde_json::Value::Object(next));
+                    } else {
+                        final_json = Some(parsed);
+                    }
+                }
+                _ => {
+                    final_json = Some(parsed);
+                }
+            }
+        }
+
+        let status = child
+            .wait()
+            .map_err(|e| format!("Failed to wait for Claude SDK runtime: {}", e))?;
+
+        let stderr = stderr_handle
+            .join()
+            .unwrap_or_else(|_| "Failed to join Claude runtime stderr reader".to_string());
+        let stdout = stdout_lines.join("\n");
+
+        Ok(CliResult {
+            stdout: stdout.clone(),
+            stderr,
+            success: status.success(),
+            json: final_json.or_else(|| serde_json::from_str(&stdout).ok()),
+        })
+    })
+    .await
+    .map_err(|e| format!("Claude SDK task join error: {}", e))?
 }
 
 /// Find the openclaw binary path
@@ -133,16 +267,8 @@ pub async fn run_openclaw_cmd(
 
     // Add HOME to PATH so node/npm are available
     if let Some(home) = dirs::home_dir() {
-        let npm_bin = home.join(".npm-global/bin");
-        let brew_bin = std::path::PathBuf::from("/opt/homebrew/bin");
-        let current_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!(
-            "{}:{}:{}",
-            npm_bin.to_string_lossy(),
-            brew_bin.to_string_lossy(),
-            current_path
-        );
-        cmd.env("PATH", new_path);
+        let _ = home;
+        with_augmented_path(&mut cmd);
     }
 
     // If a specific config path is given, set OPENCLAW_CONFIG_PATH
@@ -401,38 +527,48 @@ pub fn read_json_file(path: String) -> Result<serde_json::Value, String> {
         .or_else(|_| json5::from_str(&content).map_err(|e| format!("Parse error: {}", e)))
 }
 
+fn launch_claude_terminal() -> Result<CliResult, String> {
+    let output = Command::new("open")
+        .args(["-a", "Terminal", "--args", "claude"])
+        .output()
+        .or_else(|_| {
+            Command::new("osascript")
+                .args(["-e", "tell application \"Terminal\" to do script \"claude\""])
+                .output()
+        })
+        .map_err(|e| format!("Failed to launch Claude runtime: {}", e))?;
+
+    Ok(CliResult {
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        success: output.status.success(),
+        json: None,
+    })
+}
+
+fn resolve_custom_agent_runtime(agent_id: &str) -> Option<String> {
+    let hub = super::config::read_hub_config().ok()?;
+    let custom_agents = hub.get("customAgents")?;
+    let configs = serde_json::from_value::<Vec<CustomAgentConfig>>(custom_agents.clone()).ok()?;
+
+    configs
+        .into_iter()
+        .find(|config| config.id == agent_id)
+        .map(|config| config.runtime_profile.runtime_family)
+}
+
 /// Launch an agent process (openclaw gateway, claude code, etc.)
 #[tauri::command]
 pub async fn launch_agent(agent_type: String, config_path: Option<String>) -> Result<CliResult, String> {
-    match agent_type.as_str() {
+    let resolved_agent_type = resolve_custom_agent_runtime(&agent_type).unwrap_or(agent_type.clone());
+
+    match resolved_agent_type.as_str() {
         "openclaw" | "qclaw" => {
             // Start openclaw gateway
-            let mut args = vec!["gateway".to_string()];
-            if let Some(ref cp) = config_path {
-                // For variants, we set OPENCLAW_CONFIG_PATH
-            }
+            let args = vec!["gateway".to_string()];
             run_openclaw_cmd(args, config_path).await
         }
-        "claude-code" => {
-            // Launch claude CLI in a new terminal
-            let output = Command::new("open")
-                .args(["-a", "Terminal", "--args", "claude"])
-                .output()
-                .or_else(|_| {
-                    // Fallback: try opening via osascript
-                    Command::new("osascript")
-                        .args(["-e", "tell application \"Terminal\" to do script \"claude\""])
-                        .output()
-                })
-                .map_err(|e| format!("Failed to launch Claude Code: {}", e))?;
-
-            Ok(CliResult {
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                success: output.status.success(),
-                json: None,
-            })
-        }
+        "claude-code" => launch_claude_terminal(),
         "workbuddy" => {
             let output = Command::new("open")
                 .args(["-a", "WorkBuddy"])

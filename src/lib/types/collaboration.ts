@@ -33,6 +33,7 @@ export type ConnectorAuthMode = "none" | "token" | "ssh-key" | "oauth";
 export type TaskEventType =
   | "thread_created"
   | "thread_renamed"
+  | "primary_agent_updated"
   | "user_message"
   | "assistant_message"
   | "agent_selected"
@@ -99,7 +100,7 @@ export interface ThreadRef {
   title: string;
   goal: string;
   status: ThreadStatus;
-  default_agent_id?: string;
+  primary_agent_id?: string;
   board_id: string;
   created_at: string;
   updated_at: string;

@@ -110,7 +110,26 @@ pub fn read_hub_config() -> Result<Value, String> {
             "providers": [],
             "models": [],
             "mcpServers": [],
+            "secrets": [],
+            "customAgents": [
+                {
+                    "id": "dolphin",
+                    "name": "dolphin",
+                    "icon": "🐬",
+                    "runtime_profile": {
+                        "runtime_family": "claude-code",
+                        "auth_source": "claude-subscription",
+                        "default_model": null
+                    }
+                }
+            ],
             "skills": { "directories": [] },
+            "memory": {
+                "provider": "memos",
+                "enabled": false,
+                "base_url": "",
+                "access_token": null
+            },
             "collaboration": {
                 "connectors": [],
                 "threads": [],
@@ -137,7 +156,7 @@ pub fn write_hub_config_module(module: String, data: Value) -> Result<(), String
     let content = if path.exists() {
         fs::read_to_string(&path).map_err(|e| format!("Failed to read hub config: {}", e))?
     } else {
-        r#"{"providers":[],"models":[],"mcpServers":[],"skills":{"directories":[]},"collaboration":{"connectors":[],"threads":[],"boards":[],"tasks":[],"sessions":[],"events":[],"routes":[]}}"#.to_string()
+        r#"{"providers":[],"models":[],"mcpServers":[],"secrets":[],"customAgents":[{"id":"dolphin","name":"dolphin","icon":"🐬","runtime_profile":{"runtime_family":"claude-code","auth_source":"claude-subscription","default_model":null}}],"skills":{"directories":[]},"memory":{"provider":"memos","enabled":false,"base_url":"","access_token":null},"collaboration":{"connectors":[],"threads":[],"boards":[],"tasks":[],"sessions":[],"events":[],"routes":[]}}"#.to_string()
     };
 
     let mut config: Value = serde_json::from_str(&content)

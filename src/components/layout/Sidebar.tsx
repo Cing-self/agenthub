@@ -2,7 +2,7 @@ import { NavLink } from "react-router-dom";
 import {
   LayoutDashboard, Plug, Wrench, Zap, Lock, Settings, RefreshCw, Loader2,
   BarChart3, Eye, Brain, Network, DollarSign, User, Cloud,
-  PanelLeftClose, PanelLeftOpen, MessageSquare, ListTodo, Clock, Send,
+  PanelLeftClose, PanelLeftOpen, MessageSquare, ListTodo, Clock, Send, Terminal,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
@@ -12,10 +12,11 @@ import { useAuthStore } from "@/stores/auth-store";
 
 interface NavItem { label: string; icon: React.ReactNode; path: string; }
 
-// Config mode nav
+// Config mode nav — Dashboard is separate (top-level)
+const configDashboard: NavItem = { label: "Dashboard", icon: <LayoutDashboard size={16} />, path: "/dashboard" };
 const configResourceNav: NavItem[] = [
-  { label: "Dashboard", icon: <LayoutDashboard size={16} />, path: "/dashboard" },
   { label: "Models", icon: <Plug size={16} />, path: "/models" },
+  { label: "CLI", icon: <Terminal size={16} />, path: "/cli" },
   { label: "MCP Servers", icon: <Wrench size={16} />, path: "/mcp" },
   { label: "Skills", icon: <Zap size={16} />, path: "/skills" },
   { label: "Secrets", icon: <Lock size={16} />, path: "/secrets" },
@@ -84,6 +85,17 @@ function AgentInstances({ collapsed }: { collapsed: boolean }) {
             )}
           </NavLink>
         ))}
+        {!collapsed && (
+          <NavLink to="/remote-hosts"
+            className={({ isActive }) => cn(
+              "flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-[12px] transition-colors mt-1",
+              "hover:bg-sidebar-accent hover:text-foreground",
+              isActive ? "bg-sidebar-accent text-foreground" : "text-muted-foreground/50"
+            )}>
+            <span className="text-[11px]">＋</span>
+            <span>添加远程主机</span>
+          </NavLink>
+        )}
       </nav>
     </div>
   );
@@ -161,6 +173,11 @@ export function Sidebar() {
           </>
         ) : (
           <>
+            {/* Dashboard — top level */}
+            <nav className="flex flex-col gap-0.5 px-2 mb-2">
+              <NavLink_ item={configDashboard} collapsed={collapsed} />
+            </nav>
+
             {!collapsed && (
               <div className="px-3 pt-1 pb-1">
                 <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/70">Resources</span>

@@ -51,8 +51,8 @@ pub struct ThreadRef {
     pub title: String,
     pub goal: String,
     pub status: String,
-    #[serde(default)]
-    pub default_agent_id: Option<String>,
+    #[serde(default, alias = "default_agent_id")]
+    pub primary_agent_id: Option<String>,
     pub board_id: String,
     pub created_at: String,
     pub updated_at: String,
@@ -399,7 +399,7 @@ pub fn list_threads() -> Result<Vec<ThreadRef>, String> {
 pub fn create_thread(
     title: String,
     goal: String,
-    default_agent_id: Option<String>,
+    primary_agent_id: Option<String>,
 ) -> Result<ThreadBundle, String> {
     let trimmed_title = title.trim();
     if trimmed_title.is_empty() {
@@ -416,7 +416,7 @@ pub fn create_thread(
         title: trimmed_title.to_string(),
         goal: trimmed_goal.to_string(),
         status: "active".to_string(),
-        default_agent_id,
+        primary_agent_id,
         board_id: board_id.clone(),
         created_at: now.clone(),
         updated_at: now.clone(),
@@ -512,6 +512,47 @@ pub fn rename_thread(thread_id: String, title: String) -> Result<ThreadRef, Stri
 
     write_collaboration_state(&state)?;
     Ok(thread)
+}
+
+#[tauri::command]
+pub fn set_thread_primary_agent(thread_id: String, agent_id: String) -> Result<ThreadRef, String> {
+    let mut state = read_collaboration_state()?;
+    let now = now_iso();
+
+    let board_version = state
+        .threads
+        .iter()
+        .find(|thread| thread.id == thread_id)
+        .and_then(|thread| state.boards.iter().find(|board| board.id == thread.board_id))
+        .map(|board| board.version)
+        .ok_or_else(|| format!("Thread not found: {}", thread_id))?;
+
+    let thread = state
+        .threads
+        .iter_mut()
+        .find(|thread| thread.id == thread_id)
+        .ok_or_else(|| format!("Thread not found: {}", thread_id))?;
+
+    thread.primary_agent_id = Some(agent_id.clone());
+    thread.updated_at = now.clone();
+
+    state.events.push(TaskEvent {
+        id: next_id("event"),
+        thread_id: thread_id.clone(),
+        board_version,
+        event_type: "primary_agent_updated".to_string(),
+        title: format!("主 Agent 已切换到 {}", agent_id),
+        body: Some("这条任务线的默认接手 Agent 已更新。".to_string()),
+        agent_id: Some(agent_id),
+        session_id: None,
+        task_id: None,
+        payload: None,
+        created_at: now,
+    });
+
+    let snapshot = thread.clone();
+    write_collaboration_state(&state)?;
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -663,11 +704,6 @@ pub fn ensure_thread_session(
         .map(|board| board.version)
         .ok_or_else(|| format!("Thread not found: {}", thread_id))?;
 
-    if let Some(thread) = state.threads.iter_mut().find(|thread| thread.id == thread_id) {
-        thread.default_agent_id = Some(agent_id.clone());
-        thread.updated_at = now.clone();
-    }
-
     let session = match state
         .sessions
         .iter_mut()
@@ -720,6 +756,54 @@ pub fn ensure_thread_session(
 }
 
 #[tauri::command]
+pub fn update_thread_session(
+    thread_id: String,
+    agent_id: String,
+    runtime_session_id: Option<String>,
+    mode: Option<String>,
+    status: Option<String>,
+    last_seen_board_version: Option<u64>,
+    last_handoff_version: Option<u64>,
+) -> Result<AgentSessionRef, String> {
+    let mut state = read_collaboration_state()?;
+    let now = now_iso();
+
+    let thread = state
+        .threads
+        .iter_mut()
+        .find(|thread| thread.id == thread_id)
+        .ok_or_else(|| format!("Thread not found: {}", thread_id))?;
+    thread.updated_at = now.clone();
+
+    let session = state
+        .sessions
+        .iter_mut()
+        .find(|session| session.thread_id == thread_id && session.agent_id == agent_id)
+        .ok_or_else(|| format!("Session not found for thread {} and agent {}", thread_id, agent_id))?;
+
+    if let Some(runtime_id) = runtime_session_id {
+        session.runtime_session_id = Some(runtime_id);
+    }
+    if let Some(next_mode) = mode {
+        session.mode = next_mode;
+    }
+    if let Some(next_status) = status {
+        session.status = next_status;
+    }
+    if let Some(version) = last_seen_board_version {
+        session.last_seen_board_version = session.last_seen_board_version.max(version);
+    }
+    if let Some(version) = last_handoff_version {
+        session.last_handoff_version = session.last_handoff_version.max(version);
+    }
+    session.updated_at = now;
+
+    let snapshot = session.clone();
+    write_collaboration_state(&state)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
 pub fn create_handoff_packet(
     thread_id: String,
     to_agent_id: String,
@@ -728,6 +812,7 @@ pub fn create_handoff_packet(
 ) -> Result<HandoffPacket, String> {
     let state = read_collaboration_state()?;
     let bundle = get_thread_bundle_from_state(&state, &thread_id)?;
+    let latest_user_message_trimmed = latest_user_message.trim().to_string();
 
     let selected_task_ids = bundle
         .tasks
@@ -749,10 +834,31 @@ pub fn create_handoff_packet(
         .map(|artifact| artifact.r#ref.clone())
         .collect::<Vec<_>>();
 
+    let mut skipped_latest_user = false;
     let recent_context = bundle
         .events
         .iter()
         .filter(|event| event.event_type == "user_message" || event.event_type == "assistant_message")
+        .filter(|event| {
+            if skipped_latest_user
+                || event.event_type != "user_message"
+                || latest_user_message_trimmed.is_empty()
+            {
+                return true;
+            }
+
+            let is_latest = event
+                .body
+                .as_deref()
+                .map(|body| body.trim() == latest_user_message_trimmed)
+                .unwrap_or(false);
+            if is_latest {
+                skipped_latest_user = true;
+                return false;
+            }
+
+            true
+        })
         .take(6)
         .collect::<Vec<_>>()
         .into_iter()

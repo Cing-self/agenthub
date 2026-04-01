@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
-import { cn } from "@/lib/utils";
 import { SettingsGroup } from "@/components/shared/SettingsGroup";
 import { EditableRow } from "@/components/shared/EditableRow";
 import { toast } from "sonner";
@@ -24,9 +23,9 @@ export default function ClaudeCodeMcpTab({ agent }: Props) {
   const [expandedName, setExpandedName] = useState<string | null>(null);
   const [addingName, setAddingName] = useState("");
 
-  const claudeJsonPath = `${agent.home_dir.replace(/\/settings\.json$/, "")}/../.claude.json`.replace("/.claude/../", "/");
+  
   // Normalize: ~/.claude.json
-  const configPath = agent.home_dir.includes(".claude") ? `${agent.home_dir.split(".claude")[0]}.claude.json` : `${agent.home_dir}/../.claude.json`;
+  
 
   const load = async () => {
     setLoading(true);

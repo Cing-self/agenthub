@@ -1,14 +1,11 @@
 import { useState } from "react";
 import { cn } from "@/lib/utils";
-import { EditableRow } from "@/components/shared/EditableRow";
 import { SettingsGroup } from "@/components/shared/SettingsGroup";
 import { toast } from "sonner";
-
 interface Props {
   config: Record<string, unknown> | null;
   onSave?: (module: string, data: unknown) => Promise<void>;
 }
-
 export default function PluginsTab({ config, onSave }: Props) {
   const plugins = (config?.plugins || {}) as Record<string, unknown>;
   const allow = (plugins.allow || []) as string[];
@@ -16,16 +13,13 @@ export default function PluginsTab({ config, onSave }: Props) {
   const installs = (plugins.installs || {}) as Record<string, unknown>;
   const [addingPlugin, setAddingPlugin] = useState(false);
   const [newName, setNewName] = useState("");
-
   const savePlugins = (updated: Record<string, unknown>) => onSave?.("plugins", updated);
-
   const togglePlugin = (name: string) => {
     const e = JSON.parse(JSON.stringify(entries));
     if (e[name]) e[name].enabled = !e[name].enabled;
     else e[name] = { enabled: true };
     savePlugins({ ...plugins, entries: e });
   };
-
   const removePlugin = (name: string) => {
     const p = JSON.parse(JSON.stringify(plugins));
     const a = (p.allow || []).filter((n: string) => n !== name);
@@ -34,7 +28,6 @@ export default function PluginsTab({ config, onSave }: Props) {
     savePlugins(p);
     toast.success(`已删除 ${name}`);
   };
-
   const addPlugin = () => {
     if (!newName.trim()) return;
     const p = JSON.parse(JSON.stringify(plugins));
@@ -47,9 +40,7 @@ export default function PluginsTab({ config, onSave }: Props) {
     setNewName(""); setAddingPlugin(false);
     toast.success(`已添加 ${newName.trim()}`);
   };
-
   const pluginNames = [...new Set([...allow, ...Object.keys(entries)])];
-
   return (
     <div className="space-y-6 max-w-xl pb-8">
       <SettingsGroup title={`插件 (${pluginNames.length})`}>
@@ -80,7 +71,6 @@ export default function PluginsTab({ config, onSave }: Props) {
             </div>
           );
         })}
-
         {onSave && (
           addingPlugin ? (
             <div className="flex items-center gap-2 min-h-[44px] px-1">

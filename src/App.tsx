@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from "react-router-dom";
+import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { Toaster } from "sonner";
 import { Sidebar } from "./components/layout/Sidebar";
 import { StatusBar } from "./components/layout/StatusBar";
@@ -18,7 +18,9 @@ import UsagePage from "./pages/UsagePage";
 import AgentInstancePage from "./pages/AgentInstancePage";
 import SettingsPage from "./pages/SettingsPage";
 import AccountPage from "./pages/AccountPage";
+import RemoteHostsPage from "./pages/RemoteHostsPage";
 import DashboardPage from "./pages/DashboardPage";
+import CliPage from "./pages/CliPage";
 
 // Work pages
 import ChatPage from "./pages/work/ChatPage";
@@ -28,6 +30,8 @@ import CronPage from "./pages/work/CronPage";
 
 function App() {
   const { theme } = useThemeStore();
+  const location = useLocation();
+  const chatOwnsScroll = location.pathname === "/work/chat";
   return (
     <div className="flex h-screen bg-background text-foreground">
       <Sidebar />
@@ -39,7 +43,7 @@ function App() {
           <div className="absolute -bottom-[100px] right-[20%] w-[350px] h-[350px] rounded-full bg-primary/[0.04] blur-[80px]" />
         </div>
 
-        <main className="flex-1 overflow-y-auto p-6 relative z-10">
+        <main className={`flex-1 p-6 relative z-10 ${chatOwnsScroll ? "overflow-hidden" : "overflow-y-auto"}`}>
           <ErrorBoundary>
             <Routes>
               {/* Work mode */}
@@ -51,6 +55,7 @@ function App() {
               {/* Config mode */}
               <Route path="/dashboard" element={<DashboardPage />} />
               <Route path="/models" element={<ModelsPage />} />
+              <Route path="/cli" element={<CliPage />} />
               <Route path="/mcp" element={<McpServersPage />} />
               <Route path="/skills" element={<SkillsPage />} />
               <Route path="/secrets" element={<SecretsPage />} />
@@ -60,6 +65,7 @@ function App() {
               <Route path="/memory" element={<MemoryPage />} />
               <Route path="/collab" element={<CollaborationPage />} />
               <Route path="/agent/:agentId/*" element={<AgentInstancePage />} />
+              <Route path="/remote-hosts" element={<RemoteHostsPage />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="/account" element={<AccountPage />} />
 

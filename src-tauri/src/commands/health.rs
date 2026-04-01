@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Command;
 use sysinfo::System;
@@ -9,6 +9,7 @@ use sysinfo::System;
 pub struct DetectedAgent {
     pub id: String,
     pub agent_type: String,
+    pub runtime_family: Option<String>,
     pub name: String,
     pub icon: String,
     pub config_path: String,
@@ -17,7 +18,15 @@ pub struct DetectedAgent {
     pub pid: Option<u32>,
     pub process_name: Option<String>,
     pub version: Option<String>,
+    pub runtime_profile: Option<RuntimeProfile>,
     pub details: AgentDetails,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct RuntimeProfile {
+    pub runtime_family: String,
+    pub auth_source: Option<String>,
+    pub default_model: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -50,6 +59,12 @@ pub enum AgentDetails {
     OpenCode {
         has_agents: bool,
         has_skills: bool,
+    },
+    #[serde(rename = "custom-agent")]
+    CustomAgent {
+        based_on_runtime: String,
+        auth_source: Option<String>,
+        default_model: Option<String>,
     },
 }
 
@@ -109,6 +124,14 @@ struct ClawVariant {
     config_filename: &'static str,    // usually "openclaw.json" or "settings.json"
     process_keywords: Vec<&'static str>,
     app_path: Option<&'static str>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct CustomAgentConfig {
+    id: String,
+    name: String,
+    icon: Option<String>,
+    runtime_profile: RuntimeProfile,
 }
 
 fn claw_variants() -> Vec<ClawVariant> {
@@ -329,6 +352,7 @@ fn detect_claw_variant(sys: &System, variant: &ClawVariant) -> Option<DetectedAg
     Some(DetectedAgent {
         id: variant.id.to_string(),
         agent_type: "openclaw".to_string(),
+        runtime_family: Some("openclaw".to_string()),
         name: variant.name.to_string(),
         icon: variant.icon.to_string(),
         config_path: config_path.to_string_lossy().to_string(),
@@ -337,6 +361,7 @@ fn detect_claw_variant(sys: &System, variant: &ClawVariant) -> Option<DetectedAg
         pid,
         process_name: proc_name,
         version,
+        runtime_profile: None,
         details: AgentDetails::OpenClaw {
             variant: variant.id.to_string(),
             has_discord,
@@ -418,6 +443,7 @@ fn detect_claude_code(sys: &System) -> Option<DetectedAgent> {
     Some(DetectedAgent {
         id: "claude-code".into(),
         agent_type: "claude-code".into(),
+        runtime_family: Some("claude-code".into()),
         name: "Claude Code".into(),
         icon: "🤖".into(),
         config_path: config_path.to_string_lossy().to_string(),
@@ -426,6 +452,7 @@ fn detect_claude_code(sys: &System) -> Option<DetectedAgent> {
         pid,
         process_name: proc_name,
         version: None,
+        runtime_profile: None,
         details: AgentDetails::ClaudeCode {
             has_skills,
             has_plugins,
@@ -472,6 +499,7 @@ fn detect_workbuddy(sys: &System) -> Option<DetectedAgent> {
     Some(DetectedAgent {
         id: "workbuddy".into(),
         agent_type: "claude-code".into(), // similar to Claude Code
+        runtime_family: Some("claude-code".into()),
         name: "WorkBuddy".into(),
         icon: "👷".into(),
         config_path: config_path.to_string_lossy().to_string(),
@@ -480,6 +508,7 @@ fn detect_workbuddy(sys: &System) -> Option<DetectedAgent> {
         pid,
         process_name: proc_name,
         version: None,
+        runtime_profile: None,
         details: AgentDetails::ClaudeCode {
             has_skills,
             has_plugins: has_plugins || has_mcp,
@@ -523,6 +552,7 @@ fn detect_codex(sys: &System) -> Option<DetectedAgent> {
     Some(DetectedAgent {
         id: "codex".into(),
         agent_type: "codex".into(),
+        runtime_family: Some("codex".into()),
         name: "Codex CLI".into(),
         icon: "📦".into(),
         config_path: config_path.to_string_lossy().to_string(),
@@ -531,6 +561,7 @@ fn detect_codex(sys: &System) -> Option<DetectedAgent> {
         pid,
         process_name: proc_name,
         version,
+        runtime_profile: None,
         details: AgentDetails::Codex {
             has_config,
             has_skills,
@@ -568,6 +599,7 @@ fn detect_opencode(sys: &System) -> Option<DetectedAgent> {
     Some(DetectedAgent {
         id: "opencode".into(),
         agent_type: "opencode".into(),
+        runtime_family: Some("opencode".into()),
         name: "OpenCode".into(),
         icon: "⌨️".into(),
         config_path: config_path.to_string_lossy().to_string(),
@@ -576,11 +608,87 @@ fn detect_opencode(sys: &System) -> Option<DetectedAgent> {
         pid,
         process_name: proc_name,
         version: None,
+        runtime_profile: None,
         details: AgentDetails::OpenCode {
             has_agents,
             has_skills,
         },
     })
+}
+
+fn default_custom_agents() -> Vec<CustomAgentConfig> {
+    vec![CustomAgentConfig {
+        id: "dolphin".to_string(),
+        name: "dolphin".to_string(),
+        icon: Some("🐬".to_string()),
+        runtime_profile: RuntimeProfile {
+            runtime_family: "claude-code".to_string(),
+            auth_source: Some("claude-subscription".to_string()),
+            default_model: None,
+        },
+    }]
+}
+
+fn read_custom_agents() -> Vec<CustomAgentConfig> {
+    let hub = match super::config::read_hub_config() {
+        Ok(value) => value,
+        Err(_) => return default_custom_agents(),
+    };
+
+    let custom_agents = hub
+        .get("customAgents")
+        .and_then(|value| serde_json::from_value::<Vec<CustomAgentConfig>>(value.clone()).ok())
+        .unwrap_or_default();
+
+    if custom_agents.is_empty() {
+        default_custom_agents()
+    } else {
+        custom_agents
+    }
+}
+
+fn derive_runtime_health_template<'a>(
+    agents: &'a [DetectedAgent],
+    runtime_family: &str,
+) -> Option<&'a DetectedAgent> {
+    agents.iter().find(|agent| {
+        agent
+            .runtime_family
+            .as_deref()
+            .unwrap_or(agent.agent_type.as_str())
+            == runtime_family
+            && agent.runtime_profile.is_none()
+    })
+}
+
+fn build_custom_agent(config: &CustomAgentConfig, runtime_template: Option<&DetectedAgent>) -> DetectedAgent {
+    let runtime_family = config.runtime_profile.runtime_family.clone();
+    let icon = config.icon.clone().unwrap_or_else(|| "✨".to_string());
+    let home_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".agenthub")
+        .join("agents")
+        .join(&config.id);
+
+    DetectedAgent {
+        id: config.id.clone(),
+        agent_type: "custom-agent".to_string(),
+        runtime_family: Some(runtime_family.clone()),
+        name: config.name.clone(),
+        icon,
+        config_path: format!("agenthub://agents/{}", config.id),
+        home_dir: home_dir.to_string_lossy().to_string(),
+        running: runtime_template.map(|agent| agent.running).unwrap_or(false),
+        pid: runtime_template.and_then(|agent| agent.pid),
+        process_name: runtime_template.and_then(|agent| agent.process_name.clone()),
+        version: runtime_template.and_then(|agent| agent.version.clone()),
+        runtime_profile: Some(config.runtime_profile.clone()),
+        details: AgentDetails::CustomAgent {
+            based_on_runtime: runtime_family,
+            auth_source: config.runtime_profile.auth_source.clone(),
+            default_model: config.runtime_profile.default_model.clone(),
+        },
+    }
 }
 
 // ── Tauri Commands ────────────────────────────────────
@@ -611,6 +719,11 @@ pub fn detect_agents() -> Result<HealthStatus, String> {
     }
     if let Some(a) = detect_opencode(&sys) {
         agents.push(a);
+    }
+
+    for custom_agent in read_custom_agents() {
+        let runtime_template = derive_runtime_health_template(&agents, &custom_agent.runtime_profile.runtime_family);
+        agents.push(build_custom_agent(&custom_agent, runtime_template));
     }
 
     let total_running = agents.iter().filter(|a| a.running).count();

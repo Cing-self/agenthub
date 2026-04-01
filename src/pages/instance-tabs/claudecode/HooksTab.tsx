@@ -1,9 +1,7 @@
 import { useState } from "react";
-import { cn } from "@/lib/utils";
 import { SettingsGroup } from "@/components/shared/SettingsGroup";
 import { EditableRow } from "@/components/shared/EditableRow";
 import { SelectRow } from "@/components/shared/SelectRow";
-import { toast } from "sonner";
 
 interface Props {
   config: Record<string, unknown> | null;

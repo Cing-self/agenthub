@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
-import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
 import { SettingsGroup } from "@/components/shared/SettingsGroup";
 import { toast } from "sonner";
@@ -9,7 +8,7 @@ const GITHUB_CLIENT_ID = "Ov23licbW8XpmNbEWKle";
 const GITHUB_CLIENT_SECRET = "52edca7c282298046ad3b619ed53fc2d697b9706";
 
 export default function AccountPage() {
-  const { user, loading, loadFromDisk, login, logout } = useAuthStore();
+  const { user, loadFromDisk, login, logout } = useAuthStore();
   const [loggingIn, setLoggingIn] = useState(false);
 
   useEffect(() => { loadFromDisk(); }, [loadFromDisk]);

@@ -173,7 +173,7 @@ export default function CollaborationPage() {
       await createThread({
         title: threadTitle.trim(),
         goal: threadGoal.trim(),
-        defaultAgentId: threadAgentId || undefined,
+        primaryAgentId: threadAgentId || undefined,
       });
       setThreadTitle("");
       setThreadGoal("");

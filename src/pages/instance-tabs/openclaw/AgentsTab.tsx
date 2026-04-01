@@ -1,6 +1,5 @@
 import { useState } from "react";
-import { Loader2 } from "lucide-react";
-import { cn } from "@/lib/utils";
+// @ts-ignore
 import { EditableRow } from "@/components/shared/EditableRow";
 import { SelectRow } from "@/components/shared/SelectRow";
 import { SettingsGroup } from "@/components/shared/SettingsGroup";

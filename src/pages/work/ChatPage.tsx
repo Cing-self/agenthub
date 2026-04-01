@@ -1,12 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
+import { listen } from "@tauri-apps/api/event";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Check, Loader2, Pencil, Plus, X } from "lucide-react";
 import { toast } from "sonner";
 import { AgentSwitchRail } from "@/components/agents/AgentSwitchRail";
+import { MessageBlocksRenderer } from "@/components/chat/MessageBlocksRenderer";
+import { parseMessageContent } from "@/lib/chat/message-blocks";
+import { getRuntimeAdapter, getRuntimeSessionMode, usesNativeRuntimeSession } from "@/lib/runtime";
+import type { MessagePart, RuntimeMessageMetadata } from "@/lib/types/chat";
+import type { RuntimeStreamEvent } from "@/lib/runtime/types";
 import { cn } from "@/lib/utils";
-import type { HandoffPacket, TaskBoard, ThreadBundle } from "@/lib/types/collaboration";
+import type { AgentSessionRef, HandoffPacket, TaskBoard, TaskEvent, ThreadBundle } from "@/lib/types/collaboration";
 import { useAgentsStore } from "@/stores/agents-store";
 import { useCollaborationStore } from "@/stores/collaboration-store";
 
@@ -14,12 +20,19 @@ interface Message {
   id: string;
   role: "user" | "assistant";
   content: string;
+  rawText?: string;
+  parts: MessagePart[];
   agent: string;
+  metadata?: RuntimeMessageMetadata;
   timestamp: number;
 }
 
 const DRAFT_BUCKET = "__draft__";
-const STATELESS_AGENT_TYPES = new Set(["claude-code", "codex", "openclaw"]);
+const MESSAGE_MARKDOWN_CLASS =
+  "prose prose-sm dark:prose-invert max-w-none text-[13px] leading-relaxed " +
+  "[&_p]:my-1 [&_p]:text-[13px] [&_ul]:my-1.5 [&_ol]:my-1.5 [&_li]:my-0.5 " +
+  "[&_code]:text-[11px] [&_code]:bg-foreground/5 [&_code]:px-1 [&_code]:rounded " +
+  "[&_pre]:bg-foreground/5 [&_pre]:rounded-lg [&_pre]:p-3 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre_code]:bg-transparent [&_pre_code]:p-0";
 
 function formatThreadTitle(input: string) {
   const trimmed = input.trim();
@@ -33,22 +46,30 @@ function formatThreadTitle(input: string) {
   return trimmed.length > 24 ? `${trimmed.slice(0, 24)}…` : trimmed;
 }
 
-function formatHandoffPrompt(packet: HandoffPacket, taskTitles: string[]) {
+function formatContextPrompt(
+  packet: HandoffPacket,
+  taskTitles: string[],
+  includeRecentContext: boolean,
+) {
   const sections = [
-    "你正在 AgentHub 的同一条任务线里继续工作，请基于下面的共享上下文接手。",
-    `任务目标：${packet.objective}`,
-    packet.current_focus ? `当前焦点：${packet.current_focus}` : "",
     packet.summary ? `共享备注：\n${packet.summary}` : "",
-    packet.recent_context.length ? `最近往来：\n- ${packet.recent_context.join("\n- ")}` : "",
+    includeRecentContext && packet.recent_context.length
+      ? `最近往来：\n- ${packet.recent_context.join("\n- ")}`
+      : "",
     packet.open_questions.length ? `未解决问题：\n- ${packet.open_questions.join("\n- ")}` : "",
     packet.key_files.length ? `关键文件：\n- ${packet.key_files.join("\n- ")}` : "",
     taskTitles.length ? `当前相关子任务：\n- ${taskTitles.join("\n- ")}` : "",
-    `用户最新请求：\n${packet.latest_user_message}`,
+    `用户消息：\n${packet.latest_user_message}`,
   ]
     .filter(Boolean)
     .join("\n\n");
 
   return sections;
+}
+
+function shouldSyncNativeBoard(session: AgentSessionRef | undefined, boardVersion: number) {
+  if (!session) return false;
+  return session.last_seen_board_version < boardVersion;
 }
 
 function compactText(text: string, maxLength: number) {
@@ -90,21 +111,35 @@ function buildBoardUpdate(
   };
 }
 
-function formatContinuationPrompt(packet: HandoffPacket, taskTitles: string[]) {
-  const sections = [
-    "继续处理当前任务线，下面是最新共享上下文。",
-    `任务目标：${packet.objective}`,
-    packet.current_focus ? `当前焦点：${packet.current_focus}` : "",
-    packet.summary ? `共享备注：\n${packet.summary}` : "",
-    packet.recent_context.length ? `最近往来：\n- ${packet.recent_context.join("\n- ")}` : "",
-    packet.open_questions.length ? `待解决问题：\n- ${packet.open_questions.join("\n- ")}` : "",
-    taskTitles.length ? `当前相关子任务：\n- ${taskTitles.join("\n- ")}` : "",
-    `用户最新请求：\n${packet.latest_user_message}`,
-  ]
-    .filter(Boolean)
-    .join("\n\n");
+function buildMessagesFromEvents(events: TaskEvent[]): Message[] {
+  return [...events]
+    .filter((event) => event.event_type === "user_message" || event.event_type === "assistant_message")
+    .sort((left, right) => left.created_at.localeCompare(right.created_at))
+    .map((event) => {
+      const payload = event.payload ?? {};
+      const rawText =
+        event.event_type === "assistant_message" && typeof payload.rawText === "string"
+          ? payload.rawText
+          : event.body ?? "";
+      const parsed = parseMessageContent(rawText);
 
-  return sections;
+      return {
+        id: event.id,
+        role: event.event_type === "user_message" ? "user" : "assistant",
+        content: event.event_type === "assistant_message" ? parsed.text : event.body ?? "",
+        rawText: event.event_type === "assistant_message" ? parsed.rawText : undefined,
+        parts:
+          event.event_type === "assistant_message"
+            ? parsed.parts
+            : [{ type: "text", content: event.body ?? "" }],
+        agent: event.agent_id ?? "",
+        metadata:
+          event.event_type === "assistant_message" && payload.metadata && typeof payload.metadata === "object"
+            ? (payload.metadata as RuntimeMessageMetadata)
+            : undefined,
+        timestamp: Number.isNaN(Date.parse(event.created_at)) ? Date.now() : Date.parse(event.created_at),
+      };
+    });
 }
 
 export default function ChatPage() {
@@ -118,12 +153,14 @@ export default function ChatPage() {
     selectThread,
     createThread,
     renameThread,
+    setPrimaryAgent,
     saveBoard,
   } = useCollaborationStore();
 
   const [searchParams, setSearchParams] = useSearchParams();
   const [messageMap, setMessageMap] = useState<Record<string, Message[]>>({});
   const [input, setInput] = useState("");
+  const [composerMode, setComposerMode] = useState<"edit" | "preview">("edit");
   const [sending, setSending] = useState(false);
   const [sendingLabel, setSendingLabel] = useState("");
   const [isRenamingThread, setIsRenamingThread] = useState(false);
@@ -138,22 +175,29 @@ export default function ChatPage() {
   const requestedAgentId = searchParams.get("agent") ?? "";
   const requestedThreadId = searchParams.get("thread") ?? "";
 
-  const fallbackAgentId = agents.find((item) => item.running)?.id || agents[0]?.id || "";
-  const selectedAgentId = agents.some((item) => item.id === requestedAgentId)
-    ? requestedAgentId
-    : fallbackAgentId;
-
   const fallbackThreadId = threads.some((thread) => thread.id === storeSelectedThreadId)
     ? storeSelectedThreadId ?? ""
     : threads[0]?.id ?? "";
   const selectedThreadId = threads.some((thread) => thread.id === requestedThreadId)
     ? requestedThreadId
     : fallbackThreadId;
+  const currentThread = threads.find((thread) => thread.id === selectedThreadId);
+
+  const fallbackAgentId =
+    (currentThread?.primary_agent_id &&
+    agents.some((item) => item.id === currentThread.primary_agent_id)
+      ? currentThread.primary_agent_id
+      : null) ||
+    agents.find((item) => item.running)?.id ||
+    agents[0]?.id ||
+    "";
+  const selectedAgentId = agents.some((item) => item.id === requestedAgentId)
+    ? requestedAgentId
+    : fallbackAgentId;
 
   const activeBucket = selectedThreadId || DRAFT_BUCKET;
   const messages = messageMap[activeBucket] ?? [];
   const agent = agents.find((item) => item.id === selectedAgentId);
-  const currentThread = threads.find((thread) => thread.id === selectedThreadId);
   const currentSession = currentBundle?.sessions.find((session) => session.agent_id === selectedAgentId);
 
   useEffect(() => {
@@ -186,6 +230,15 @@ export default function ChatPage() {
     setIsRenamingThread(false);
   }, [currentThread?.id, currentThread?.title]);
 
+  useEffect(() => {
+    if (!currentBundle) return;
+    const restoredMessages = buildMessagesFromEvents(currentBundle.events);
+    setMessageMap((prev) => ({
+      ...prev,
+      [currentBundle.thread.id]: restoredMessages,
+    }));
+  }, [currentBundle]);
+
   const updateParams = (next: { agentId?: string; threadId?: string | null }) => {
     const params = new URLSearchParams(searchParams);
     if (next.agentId) {
@@ -206,12 +259,52 @@ export default function ChatPage() {
     }));
   };
 
+  const updateMessage = (threadId: string, messageId: string, updater: (message: Message) => Message) => {
+    setMessageMap((prev) => ({
+      ...prev,
+      [threadId]: (prev[threadId] ?? []).map((message) =>
+        message.id === messageId ? updater(message) : message,
+      ),
+    }));
+  };
+
+  const removeMessage = (threadId: string, messageId: string) => {
+    setMessageMap((prev) => ({
+      ...prev,
+      [threadId]: (prev[threadId] ?? []).filter((message) => message.id !== messageId),
+    }));
+  };
+
+  const persistChatSnapshot = async (params: {
+    threadId: string;
+    role: Message["role"];
+    agentId: string;
+    agentName: string;
+    content: string;
+    timestamp: number;
+  }) => {
+    if (!params.content.trim()) return;
+
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("append_chat_memory_record", {
+        threadId: params.threadId,
+        agentId: params.agentId,
+        role: params.role,
+        content: params.content.trim(),
+        timestamp: new Date(params.timestamp).toISOString(),
+      });
+    } catch (error) {
+      console.error("Failed to persist chat snapshot to memory provider:", error);
+    }
+  };
+
   const ensureThreadForChat = async () => {
     if (selectedThreadId) return selectedThreadId;
     const bundle = await createThread({
       title: formatThreadTitle(input),
       goal: input.trim(),
-      defaultAgentId: selectedAgentId || undefined,
+      primaryAgentId: selectedAgentId || undefined,
     });
     updateParams({ threadId: bundle.thread.id, agentId: selectedAgentId });
     return bundle.thread.id;
@@ -228,7 +321,7 @@ export default function ChatPage() {
       const session = await invoke<{ id: string }>("ensure_thread_session", {
         threadId: selectedThreadId,
         agentId,
-        mode: "stateless",
+        mode: getRuntimeSessionMode(agents.find((item) => item.id === agentId) ?? null),
         runtimeSessionId: null,
       });
       await invoke("record_thread_event", {
@@ -241,6 +334,9 @@ export default function ChatPage() {
         taskId: null,
         payload: null,
       });
+      if (currentThread?.primary_agent_id !== agentId) {
+        await setPrimaryAgent(selectedThreadId, agentId);
+      }
       await selectThread(selectedThreadId);
     } catch (error) {
       console.error("Failed to switch agent session:", error);
@@ -248,7 +344,13 @@ export default function ChatPage() {
   };
 
   const handleThreadChange = async (threadId: string) => {
-    updateParams({ threadId, agentId: selectedAgentId });
+    const nextThread = threads.find((thread) => thread.id === threadId);
+    const nextAgentId =
+      (nextThread?.primary_agent_id &&
+      agents.some((item) => item.id === nextThread.primary_agent_id)
+        ? nextThread.primary_agent_id
+        : selectedAgentId) || undefined;
+    updateParams({ threadId, agentId: nextAgentId });
     await selectThread(threadId);
     inputRef.current?.focus();
   };
@@ -258,7 +360,7 @@ export default function ChatPage() {
       const bundle = await createThread({
         title: formatThreadTitle(input),
         goal: input.trim(),
-        defaultAgentId: selectedAgentId || undefined,
+        primaryAgentId: selectedAgentId || undefined,
       });
       updateParams({ threadId: bundle.thread.id, agentId: selectedAgentId });
       toast.success("已创建新的任务线");
@@ -296,39 +398,84 @@ export default function ChatPage() {
     const userContent = input.trim();
     const previousAgentId = messages[messages.length - 1]?.agent ?? null;
     const agentName = agent?.name || selectedAgentId;
-    const runtimeIsStateless = STATELESS_AGENT_TYPES.has(agent?.agent_type ?? "");
-    const isFirstSession = !currentSession;
+    if (!agent) {
+      toast.error("当前 Agent 不可用");
+      return;
+    }
+
+    const runtime = getRuntimeAdapter(agent);
+    const runtimeUsesNativeSession = usesNativeRuntimeSession(agent);
+    const runtimeMode = getRuntimeSessionMode(agent);
+    const requestId = runtime.capabilities.streaming_output ? crypto.randomUUID() : null;
+    const streamingAssistantId = requestId ? `stream-${requestId}` : null;
+    const currentBoardVersion = currentBundle?.board.version ?? 1;
+    const needsNativeBootstrap = runtimeUsesNativeSession && !currentSession?.last_handoff_version;
+    const needsNativeBoardSync = runtimeUsesNativeSession && shouldSyncNativeBoard(currentSession, currentBoardVersion);
     const isAgentSwitch = Boolean(previousAgentId && previousAgentId !== selectedAgentId);
-    const needsHandoff = isFirstSession || isAgentSwitch;
+    const needsSharedContext = !runtimeUsesNativeSession || isAgentSwitch || needsNativeBootstrap || needsNativeBoardSync;
+    const includeRecentContext = !runtimeUsesNativeSession || isAgentSwitch || needsNativeBootstrap;
 
     const userMsg: Message = {
       id: crypto.randomUUID(),
       role: "user",
       content: userContent,
+      parts: [{ type: "text", content: userContent }],
       agent: selectedAgentId,
       timestamp: Date.now(),
     };
 
     appendMessage(threadId, userMsg);
+    if (streamingAssistantId) {
+      appendMessage(threadId, {
+        id: streamingAssistantId,
+        role: "assistant",
+        content: "",
+        rawText: "",
+        parts: [{ type: "text", content: "" }],
+        agent: selectedAgentId,
+        timestamp: Date.now(),
+      });
+    }
     setInput("");
+    setComposerMode("edit");
     setSending(true);
     setSendingLabel(
-      needsHandoff
-        ? isAgentSwitch
-          ? `正在切换到 ${agentName} 并同步上下文...`
-          : `正在为 ${agentName} 初始化上下文...`
-        : runtimeIsStateless
-          ? `正在整理上下文并交给 ${agentName} 处理...`
-          : `正在交给 ${agentName} 处理...`,
+      isAgentSwitch
+        ? `正在切换到 ${agentName} 并同步上下文...`
+        : needsNativeBootstrap
+          ? `正在为 ${agentName} 初始化会话...`
+          : needsNativeBoardSync
+            ? `正在同步共享上下文并交给 ${agentName} 处理...`
+            : !runtimeUsesNativeSession
+              ? `正在整理必要上下文并交给 ${agentName} 处理...`
+              : `正在交给 ${agentName} 处理...`,
     );
+
+    let stopStreamListener: (() => void) | null = null;
 
     try {
       const { invoke } = await import("@tauri-apps/api/core");
+      if (requestId && streamingAssistantId) {
+        stopStreamListener = await listen<RuntimeStreamEvent>("agenthub://runtime-stream", (event) => {
+          if (event.payload.requestId !== requestId) return;
+
+          const partialRawText = event.payload.rawText || "";
+          const parsedPartial = parseMessageContent(partialRawText);
+
+          updateMessage(threadId, streamingAssistantId, (message) => ({
+            ...message,
+            content: parsedPartial.text || partialRawText,
+            rawText: partialRawText,
+            parts: parsedPartial.parts,
+          }));
+        });
+      }
+
       const session = await invoke<{ id: string }>("ensure_thread_session", {
         threadId,
         agentId: selectedAgentId,
-        mode: "stateless",
-        runtimeSessionId: null,
+        mode: runtimeMode,
+        runtimeSessionId: currentSession?.runtime_session_id ?? null,
       });
 
       await invoke("record_thread_event", {
@@ -342,18 +489,31 @@ export default function ChatPage() {
         payload: null,
       });
 
-      const handoff = await invoke<HandoffPacket>("create_handoff_packet", {
+      void persistChatSnapshot({
         threadId,
-        toAgentId: selectedAgentId,
-        latestUserMessage: userContent,
-        fromAgentId: previousAgentId,
+        role: "user",
+        agentId: selectedAgentId,
+        agentName,
+        content: userContent,
+        timestamp: userMsg.timestamp,
       });
 
-      const bundleTasks = currentBundle?.tasks
-        .filter((task) => handoff.selected_task_ids.includes(task.id))
-        .map((task) => task.title) ?? [];
+      const handoff = needsSharedContext
+        ? await invoke<HandoffPacket>("create_handoff_packet", {
+            threadId,
+            toAgentId: selectedAgentId,
+            latestUserMessage: userContent,
+            fromAgentId: previousAgentId,
+          })
+        : null;
 
-      if (needsHandoff) {
+      const bundleTasks = handoff
+        ? currentBundle?.tasks
+            .filter((task) => handoff.selected_task_ids.includes(task.id))
+            .map((task) => task.title) ?? []
+        : [];
+
+      if (handoff && runtimeUsesNativeSession && (isAgentSwitch || needsNativeBootstrap || needsNativeBoardSync)) {
         await invoke("record_thread_event", {
           threadId,
           eventType: "handoff_generated",
@@ -364,92 +524,53 @@ export default function ChatPage() {
           taskId: null,
           payload: {
             boardVersion: handoff.board_version,
+            includeRecentContext,
             selectedTaskIds: handoff.selected_task_ids,
           },
         });
       }
 
-      const runtimePrompt = needsHandoff
-        ? formatHandoffPrompt(handoff, bundleTasks)
-        : formatContinuationPrompt(handoff, bundleTasks);
+      const runtimePrompt = handoff
+        ? formatContextPrompt(handoff, bundleTasks, includeRecentContext)
+        : userContent;
 
-      let response = "";
+      const runtimeResult = await runtime.sendMessage({
+        agent,
+        threadId,
+        agentId: selectedAgentId,
+        prompt: runtimePrompt,
+        runtimeSessionId: currentSession?.runtime_session_id ?? null,
+        requestId,
+      });
+      const parsedResponse = parseMessageContent(runtimeResult.rawText);
+      const response = parsedResponse.text || runtimeResult.rawText;
+      const runtimeSessionId = runtimeResult.runtimeSessionId;
 
-      if (agent?.agent_type === "claude-code") {
-        const escaped = runtimePrompt
-          .replace(/\\/g, "\\\\")
-          .replace(/"/g, '\\"')
-          .replace(/`/g, "\\`")
-          .replace(/\$/g, "\\$");
-        const result = await invoke<{ stdout: string; success: boolean }>("run_shell_cmd", {
-          command: `claude -p "${escaped}" 2>/dev/null`,
-          timeoutSecs: 120,
-        });
-        response = result.success && result.stdout.trim() ? result.stdout.trim() : "（无回复或超时）";
-      } else if (agent?.agent_type === "codex") {
-        const escaped = runtimePrompt
-          .replace(/\\/g, "\\\\")
-          .replace(/"/g, '\\"')
-          .replace(/`/g, "\\`")
-          .replace(/\$/g, "\\$");
-        const result = await invoke<{ stdout: string; success: boolean }>("run_shell_cmd", {
-          command: `codex exec "${escaped}" 2>/dev/null`,
-          timeoutSecs: 120,
-        });
-        response = result.success && result.stdout.trim() ? result.stdout.trim() : "（无回复或超时）";
-      } else if (agent?.agent_type === "openclaw") {
-        const idKey = `hub-${Date.now()}`;
-        const result = await invoke<{ stdout: string; success: boolean; json?: unknown }>("run_openclaw_cmd", {
-          args: [
-            "gateway",
-            "call",
-            "agent",
-            "--params",
-            JSON.stringify({
-              message: runtimePrompt,
-              agentId: "main",
-              idempotencyKey: idKey,
-            }),
-            "--json",
-            "--expect-final",
-            "--timeout",
-            "90000",
-          ],
-          configPath: agent.config_path !== "default" ? agent.config_path : null,
-        });
-        if (result.json) {
-          const data = result.json as Record<string, unknown>;
-          const payloads = ((data.result as Record<string, unknown>)?.payloads || []) as { text?: string }[];
-          response = payloads.map((payload) => payload.text || "").join("\n").trim() || "（无回复）";
-        } else if (result.stdout) {
-          const lines = result.stdout.split("\n").filter((line) => line.trim().startsWith("{"));
-          const jsonLine = lines.pop();
-          if (jsonLine) {
-            try {
-              const data = JSON.parse(jsonLine) as {
-                result?: { payloads?: { text?: string }[] };
-              };
-              const payloads = data.result?.payloads || [];
-              response = payloads.map((payload) => payload.text || "").join("\n").trim() || "（无回复）";
-            } catch {
-              response = "（解析失败）";
-            }
-          } else {
-            response = "（无回复）";
-          }
-        } else {
-          response = "（Gateway 未响应）";
-        }
-      } else {
-        response = "该 Agent 暂不支持对话";
-      }
-
-      appendMessage(threadId, {
-        id: crypto.randomUUID(),
+      const assistantTimestamp = Date.now();
+      const assistantMessage: Message = {
+        id: streamingAssistantId ?? crypto.randomUUID(),
         role: "assistant",
         content: response,
+        rawText: runtimeResult.rawText,
+        parts: parsedResponse.parts,
         agent: selectedAgentId,
-        timestamp: Date.now(),
+        metadata: runtimeResult.metadata,
+        timestamp: assistantTimestamp,
+      };
+
+      if (streamingAssistantId) {
+        updateMessage(threadId, streamingAssistantId, () => assistantMessage);
+      } else {
+        appendMessage(threadId, assistantMessage);
+      }
+
+      void persistChatSnapshot({
+        threadId,
+        role: "assistant",
+        agentId: selectedAgentId,
+        agentName,
+        content: response.trim() || runtimeResult.rawText.trim(),
+        timestamp: assistantTimestamp,
       });
 
       await invoke("record_thread_event", {
@@ -460,7 +581,11 @@ export default function ChatPage() {
         agentId: selectedAgentId,
         sessionId: session.id,
         taskId: null,
-        payload: null,
+        payload: {
+          rawText: runtimeResult.rawText,
+          blocks: parsedResponse.blocks,
+          metadata: runtimeResult.metadata ?? null,
+        },
       });
 
       const latestBundle = await invoke<ThreadBundle>("get_thread_bundle", { threadId });
@@ -469,20 +594,34 @@ export default function ChatPage() {
         response,
       });
       await saveBoard(nextBoard);
+      const refreshedBundle = await invoke<ThreadBundle>("get_thread_bundle", { threadId });
+      await invoke("update_thread_session", {
+        threadId,
+        agentId: selectedAgentId,
+        runtimeSessionId,
+        mode: runtimeMode,
+        status: "idle",
+        lastSeenBoardVersion: refreshedBundle.board.version,
+        lastHandoffVersion: handoff?.board_version ?? currentSession?.last_handoff_version ?? 0,
+      });
 
       await selectThread(threadId);
     } catch (error) {
+      if (streamingAssistantId) {
+        removeMessage(threadId, streamingAssistantId);
+      }
       toast.error(`发送失败: ${error}`);
+    } finally {
+      stopStreamListener?.();
+      setSending(false);
+      setSendingLabel("");
+      inputRef.current?.focus();
     }
-
-    setSending(false);
-    setSendingLabel("");
-    inputRef.current?.focus();
   };
 
   return (
-    <div className="flex h-full flex-col">
-      <div className="mx-auto w-full max-w-4xl shrink-0 pb-3">
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="sticky top-0 z-20 mx-auto w-full max-w-4xl shrink-0 pb-3">
         <div className="inline-flex max-w-full flex-wrap items-center gap-1.5 rounded-[18px] border border-white/45 bg-white/80 p-1.5 shadow-[0_20px_56px_-42px_rgba(83,48,26,0.45)] backdrop-blur dark:border-white/8 dark:bg-white/[0.05]">
           <button
             onClick={() => {
@@ -603,8 +742,8 @@ export default function ChatPage() {
         </div>
       </div>
 
-      <div className="mx-auto flex w-full max-w-4xl flex-1 flex-col">
-        <div className="flex-1 space-y-3 overflow-y-auto pb-3">
+      <div className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col">
+        <div className="flex-1 min-h-0 space-y-3 overflow-y-auto pb-3">
           {messages.length === 0 && (
             <div className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
               <span className="text-2xl">{agent?.icon || "💬"}</span>
@@ -622,15 +761,11 @@ export default function ChatPage() {
             <div key={message.id} className={cn("flex", message.role === "user" ? "justify-end" : "justify-start")}>
               <div className={cn("max-w-[80%] rounded-2xl px-4 py-2.5", message.role === "user" ? "glass" : "")}>
                 {message.role === "assistant" ? (
-                  <div
-                    className="prose prose-sm dark:prose-invert max-w-none text-[13px] leading-relaxed
-                    [&_p]:my-1 [&_p]:text-[13px] [&_code]:text-[11px] [&_code]:bg-foreground/5 [&_code]:px-1 [&_code]:rounded
-                    [&_pre]:bg-foreground/5 [&_pre]:rounded-lg [&_pre]:p-3 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre_code]:bg-transparent [&_pre_code]:p-0"
-                  >
+                  <MessageBlocksRenderer parts={message.parts} />
+                ) : (
+                  <div className={MESSAGE_MARKDOWN_CLASS}>
                     <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown>
                   </div>
-                ) : (
-                  <p className="text-[13px]">{message.content}</p>
                 )}
               </div>
             </div>
@@ -646,46 +781,86 @@ export default function ChatPage() {
         </div>
 
         <div className="shrink-0 pb-1">
-          <div className="glass flex items-end gap-2 rounded-2xl px-4 py-3">
-            <textarea
-              ref={inputRef}
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  void send();
-                }
-              }}
-              placeholder={agent ? `发送给 ${agent.name}，并挂到当前 Thread...` : "选择 Agent..."}
-              disabled={!selectedAgentId || sending}
-              rows={1}
-              className="max-h-[100px] flex-1 resize-none bg-transparent text-[13px] outline-none placeholder:text-muted-foreground disabled:opacity-40"
-              style={{ minHeight: "22px" }}
-            />
-            <button
-              onClick={() => {
-                void send();
-              }}
-              disabled={!input.trim() || !selectedAgentId || sending}
-              className={cn(
-                "flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors",
-                input.trim() ? "bg-foreground text-background" : "bg-foreground/10 text-muted-foreground",
+          <div className="glass rounded-2xl px-4 py-3">
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <div className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background/70 p-1 text-[11px] text-muted-foreground">
+                <button
+                  onClick={() => setComposerMode("edit")}
+                  className={cn(
+                    "rounded-full px-2.5 py-1 transition-colors",
+                    composerMode === "edit" ? "bg-foreground text-background" : "hover:text-foreground",
+                  )}
+                >
+                  编辑
+                </button>
+                <button
+                  onClick={() => setComposerMode("preview")}
+                  className={cn(
+                    "rounded-full px-2.5 py-1 transition-colors",
+                    composerMode === "preview" ? "bg-foreground text-background" : "hover:text-foreground",
+                  )}
+                >
+                  预览
+                </button>
+              </div>
+              <span className="text-[11px] text-muted-foreground">
+                {composerMode === "preview" ? "发送前按 Markdown 预览" : "Enter 发送，Shift+Enter 换行"}
+              </span>
+            </div>
+
+            <div className="flex items-end gap-2">
+              {composerMode === "edit" ? (
+                <textarea
+                  ref={inputRef}
+                  value={input}
+                  onChange={(event) => setInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      void send();
+                    }
+                  }}
+                  placeholder={agent ? `发送给 ${agent.name}，并挂到当前 Thread...` : "选择 Agent..."}
+                  disabled={!selectedAgentId || sending}
+                  rows={1}
+                  className="max-h-[160px] flex-1 resize-none bg-transparent text-[13px] outline-none placeholder:text-muted-foreground disabled:opacity-40"
+                  style={{ minHeight: "72px" }}
+                />
+              ) : (
+                <div className="min-h-[72px] max-h-[160px] flex-1 overflow-y-auto rounded-2xl border border-border/50 bg-background/35 px-3 py-2">
+                  {input.trim() ? (
+                    <div className={MESSAGE_MARKDOWN_CLASS}>
+                      <Markdown remarkPlugins={[remarkGfm]}>{input}</Markdown>
+                    </div>
+                  ) : (
+                    <div className="pt-1 text-[13px] text-muted-foreground">输入内容后，这里会显示 Markdown 预览。</div>
+                  )}
+                </div>
               )}
-            >
-              <svg
-                width="14"
-                height="14"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
+              <button
+                onClick={() => {
+                  void send();
+                }}
+                disabled={!input.trim() || !selectedAgentId || sending}
+                className={cn(
+                  "flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors",
+                  input.trim() ? "bg-foreground text-background" : "bg-foreground/10 text-muted-foreground",
+                )}
               >
-                <path d="M12 19V5M5 12l7-7 7 7" />
-              </svg>
-            </button>
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M12 19V5M5 12l7-7 7 7" />
+                </svg>
+              </button>
+            </div>
           </div>
         </div>
       </div>

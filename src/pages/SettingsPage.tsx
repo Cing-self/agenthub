@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Settings, Sun, Moon, Monitor, FileCode, ChevronRight } from "lucide-react";
+
+import { Settings, Sun, Moon, FileCode, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useThemeStore } from "@/stores/theme-store";
 import { NavLink } from "react-router-dom";

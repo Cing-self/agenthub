@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Eye, Search, ChevronDown, ChevronRight, AlertTriangle, Copy, Check, FileText, Wrench, MessageSquare, Bot, Layers } from "lucide-react";
+import { Eye, ChevronDown, ChevronRight, AlertTriangle, Copy, Check, FileText, Wrench, MessageSquare, Bot, Layers } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAgentsStore } from "@/stores/agents-store";
 

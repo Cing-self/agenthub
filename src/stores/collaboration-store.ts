@@ -10,7 +10,7 @@ import type {
 interface CreateThreadInput {
   title: string;
   goal: string;
-  defaultAgentId?: string;
+  primaryAgentId?: string;
 }
 
 interface CreateTaskInput {
@@ -61,6 +61,7 @@ interface CollaborationState {
   selectThread: (threadId: string | null) => Promise<void>;
   createThread: (input: CreateThreadInput) => Promise<ThreadBundle>;
   renameThread: (threadId: string, title: string) => Promise<void>;
+  setPrimaryAgent: (threadId: string, agentId: string) => Promise<void>;
   saveBoard: (board: TaskBoard) => Promise<void>;
   createTask: (input: CreateTaskInput) => Promise<void>;
   upsertConnector: (input: UpsertConnectorInput) => Promise<void>;
@@ -134,13 +135,13 @@ export const useCollaborationStore = create<CollaborationState>((set, get) => ({
     }
   },
 
-  createThread: async ({ title, goal, defaultAgentId }) => {
+  createThread: async ({ title, goal, primaryAgentId }) => {
     set({ creatingThread: true });
     try {
       const bundle = await invokeCollaboration<ThreadBundle>("create_thread", {
         title,
         goal,
-        defaultAgentId: defaultAgentId || null,
+        primaryAgentId: primaryAgentId || null,
       });
 
       set((state) => ({
@@ -185,6 +186,29 @@ export const useCollaborationStore = create<CollaborationState>((set, get) => ({
       console.error("Failed to rename thread:", error);
       set({ renamingThread: false });
       throw error;
+    }
+  },
+
+  setPrimaryAgent: async (threadId, agentId) => {
+    const thread = await invokeCollaboration<ThreadRef>("set_thread_primary_agent", {
+      threadId,
+      agentId,
+    });
+
+    set((state) => ({
+      threads: state.threads.map((item) => (item.id === thread.id ? thread : item)),
+      currentBundle:
+        state.currentBundle?.thread.id === thread.id
+          ? {
+              ...state.currentBundle,
+              thread,
+            }
+          : state.currentBundle,
+    }));
+
+    if (get().selectedThreadId === thread.id) {
+      const bundle = await loadThreadBundle(thread.id);
+      set({ currentBundle: bundle });
     }
   },
 

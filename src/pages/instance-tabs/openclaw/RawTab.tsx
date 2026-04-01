@@ -1,6 +1,5 @@
 import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
-import { SettingsGroup } from "@/components/shared/SettingsGroup";
 
 interface Props {
   config: Record<string, unknown> | null;

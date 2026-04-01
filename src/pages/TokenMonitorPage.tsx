@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
-import { BarChart3, MessageSquare, Layers, Wrench, RefreshCw, Loader2, Calendar } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { BarChart3, MessageSquare, Layers, Wrench, RefreshCw, Loader2 } from "lucide-react";
 
 interface DailyActivity {
   date: string;

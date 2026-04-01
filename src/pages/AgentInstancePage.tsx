@@ -1,9 +1,9 @@
-import { useParams, NavLink, Routes, Route, Navigate } from "react-router-dom";
+import { useParams, NavLink, Routes, Route } from "react-router-dom";
 import { useAgentsStore } from "@/stores/agents-store";
 import { cn } from "@/lib/utils";
 import { useEffect, useState, useCallback } from "react";
 import {
-  Bot, Radio, Wrench, Puzzle, Globe, Clock, Zap, FileCode, RefreshCw, Settings,
+  Bot, Radio, Wrench, Puzzle, Globe, FileCode, Settings,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -59,11 +59,12 @@ const CODEX_TABS: TabDef[] = [
 ];
 
 export default function AgentInstancePage() {
-  const { agentId, "*": subPath } = useParams();
+  const { agentId } = useParams();
   const { agents } = useAgentsStore();
   const agent = agents.find((a) => a.id === agentId);
   const [config, setConfig] = useState<Record<string, unknown> | null>(null);
   const [configLoading, setConfigLoading] = useState(true);
+  const runtimeFamily = agent?.runtime_family ?? agent?.runtime_profile?.runtime_family ?? agent?.agent_type;
 
   // Load the agent's config file
   // Only show loading spinner on first load, not on reloads (to preserve child state)
@@ -72,6 +73,13 @@ export default function AgentInstancePage() {
     if (!config) setConfigLoading(true); // only first load
     try {
       const { invoke } = await import("@tauri-apps/api/core");
+      if (agent.config_path.startsWith("agenthub://")) {
+        setConfig({
+          runtimeProfile: agent.runtime_profile ?? null,
+          runtimeFamily: agent.runtime_family ?? agent.agent_type,
+        });
+        return;
+      }
       const data = await invoke<Record<string, unknown>>("read_config", {
         configFile: agent.config_path,
       });
@@ -106,7 +114,7 @@ export default function AgentInstancePage() {
     if (!agent) return;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      if (agent.agent_type === "claude-code" || agent.agent_type === "codex") {
+      if (runtimeFamily === "claude-code" || runtimeFamily === "codex") {
         // Claude Code / Codex: write the entire file directly
         const jsonStr = JSON.stringify(newConfig, null, 2);
         await invoke("write_json_file", { path: agent.config_path, data: jsonStr });
@@ -133,9 +141,11 @@ export default function AgentInstancePage() {
   }
 
   const tabs =
-    agent.agent_type === "openclaw"
+    agent.agent_type === "custom-agent"
+      ? [{ label: "Overview", path: "", icon: <Settings size={14} /> }]
+      : runtimeFamily === "openclaw"
       ? OPENCLAW_TABS
-      : agent.agent_type === "claude-code"
+      : runtimeFamily === "claude-code"
       ? CLAUDE_CODE_TABS
       : CODEX_TABS;
 
@@ -170,7 +180,7 @@ export default function AgentInstancePage() {
                   toast.success("正在重启...");
                   // Wait a moment then relaunch
                   setTimeout(async () => {
-                    await invoke("launch_agent", { agentType: agent.agent_type === "openclaw" ? "openclaw" : agent.id, configPath: agent.config_path });
+                    await invoke("launch_agent", { agentType: runtimeFamily === "openclaw" ? "openclaw" : agent.id, configPath: agent.config_path });
                     // Refresh agents list
                     const { useAgentsStore } = await import("@/stores/agents-store");
                     useAgentsStore.getState().refresh();
@@ -186,7 +196,7 @@ export default function AgentInstancePage() {
               onClick={async () => {
                 try {
                   const { invoke } = await import("@tauri-apps/api/core");
-                  await invoke("launch_agent", { agentType: agent.agent_type === "openclaw" ? "openclaw" : agent.id, configPath: agent.config_path });
+                  await invoke("launch_agent", { agentType: runtimeFamily === "openclaw" ? "openclaw" : agent.id, configPath: agent.config_path });
                   toast.success("已启动");
                   setTimeout(async () => {
                     const { useAgentsStore } = await import("@/stores/agents-store");
@@ -248,7 +258,7 @@ export default function AgentInstancePage() {
       ) : (
         <Routes>
           <Route index element={<OverviewTab agent={agent} config={config} />} />
-          {agent.agent_type === "claude-code" && (
+          {runtimeFamily === "claude-code" && agent.agent_type !== "custom-agent" && (
             <>
               <Route path="model" element={<ClaudeCodeModelTab agent={agent} config={config} onSave={saveFullConfig} />} />
               <Route path="interaction" element={<ClaudeCodeInteractionTab config={config} onSave={saveFullConfig} />} />
@@ -260,12 +270,12 @@ export default function AgentInstancePage() {
               <Route path="plugins" element={<ClaudeCodePluginsTab agent={agent} />} />
             </>
           )}
-          {agent.agent_type === "codex" && (
+          {runtimeFamily === "codex" && (
             <>
               <Route path="config" element={<CodexConfigTab agent={agent} />} />
             </>
           )}
-          {agent.agent_type === "openclaw" && (
+          {runtimeFamily === "openclaw" && (
             <>
               <Route path="agents" element={<OpenClawAgentsTab config={config} onSave={saveConfigModule} />} />
               <Route path="channels" element={<OpenClawChannelsTab config={config} onSave={saveConfigModule} />} />

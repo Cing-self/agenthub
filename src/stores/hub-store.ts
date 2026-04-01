@@ -46,12 +46,6 @@ interface HubState {
   saveHub: () => Promise<void>;
 }
 
-function markDirty(set: (fn: (s: HubState) => Partial<HubState>) => void) {
-  return (updater: (s: HubState) => Partial<HubState>) => {
-    set((s) => ({ ...updater(s), dirty: true }));
-    scheduleAutoSave();
-  };
-}
 
 export const useHubStore = create<HubState>((set, get) => ({
   providers: [],

@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
-import { cn } from "@/lib/utils";
 import { EditableRow } from "@/components/shared/EditableRow";
 import { SelectRow } from "@/components/shared/SelectRow";
 import { SettingsGroup } from "@/components/shared/SettingsGroup";
@@ -67,7 +66,7 @@ export default function CodexConfigTab({ agent }: Props) {
   const [config, setConfig] = useState<CodexConfig | null>(null);
   const [rawToml, setRawToml] = useState("");
   const [loading, setLoading] = useState(true);
-  const [features, setFeatures] = useState<{ name: string; stage: string; enabled: boolean }[]>([]);
+  
 
   const configPath = `${agent.home_dir}/config.toml`;
 
@@ -86,13 +85,7 @@ export default function CodexConfigTab({ agent }: Props) {
       const effortMatch = text.match(/^model_reasoning_effort\s*=\s*"(.+?)"/m);
       if (effortMatch) cfg.model_reasoning_effort = effortMatch[1];
 
-      // Get features from CLI
-      const featResult = await invoke<{ stdout: string }>("run_openclaw_cmd", {
-        args: ["sh", "-c", "codex features list 2>/dev/null"],
-        configPath: null,
-      }).catch(() => null);
-
-      // Actually, run_openclaw_cmd runs openclaw, not shell. Let me read features differently.
+      // Parse features from TOML (CLI approach removed — read directly)
       // Parse features from the TOML
       const featSection = text.match(/\[features\]([\s\S]*?)(?=\[|$)/);
       if (featSection) {

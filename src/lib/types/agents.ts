@@ -1,8 +1,12 @@
 export interface OpenClawDetails {
   type: "openclaw";
+  variant: string;
   has_discord: boolean;
   has_telegram: boolean;
   has_whatsapp: boolean;
+  has_feishu: boolean;
+  has_slack: boolean;
+  has_weixin: boolean;
   agent_count: number;
   workspace_count: number;
 }
@@ -26,15 +30,30 @@ export interface OpenCodeDetails {
   has_skills: boolean;
 }
 
+export interface CustomAgentDetails {
+  type: "custom-agent";
+  based_on_runtime: string;
+  auth_source?: string | null;
+  default_model?: string | null;
+}
+
 export type AgentDetails =
   | OpenClawDetails
   | ClaudeCodeDetails
   | CodexDetails
-  | OpenCodeDetails;
+  | OpenCodeDetails
+  | CustomAgentDetails;
+
+export interface RuntimeProfile {
+  runtime_family: string;
+  auth_source?: string | null;
+  default_model?: string | null;
+}
 
 export interface DetectedAgent {
   id: string;
   agent_type: string;
+  runtime_family?: string;
   name: string;
   icon: string;
   config_path: string;
@@ -43,6 +62,7 @@ export interface DetectedAgent {
   pid: number | null;
   process_name: string | null;
   version: string | null;
+  runtime_profile?: RuntimeProfile | null;
   details: AgentDetails;
 }
 

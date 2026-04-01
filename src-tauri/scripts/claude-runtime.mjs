@@ -1,0 +1,557 @@
+import os from "node:os";
+import path from "node:path";
+import fs from "node:fs/promises";
+import {
+  createSdkMcpServer,
+  query,
+  tool,
+} from "@anthropic-ai/claude-agent-sdk";
+import { z } from "zod";
+
+const AGENTHUB_MEMO_PREFIX = "<!-- agenthub-memory:";
+const OPENMEM_APP_ID = "agenthub";
+
+function sanitizeOpenMemKey(value) {
+  return String(value || "")
+    .split("")
+    .map((char) => (/^[A-Za-z0-9_-]$/.test(char) ? char : "-"))
+    .join("");
+}
+
+function openMemUserId() {
+  const user = process.env.USER || process.env.USERNAME || os.userInfo().username || "default";
+  return `agenthub-user-${sanitizeOpenMemKey(user.toLowerCase())}`;
+}
+
+async function readStdin() {
+  const chunks = [];
+  for await (const chunk of process.stdin) {
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+function hubConfigPath() {
+  return path.join(os.homedir(), ".agenthub", "hub.json");
+}
+
+async function readHubConfig() {
+  try {
+    const file = await fs.readFile(hubConfigPath(), "utf8");
+    return JSON.parse(file);
+  } catch {
+    return {
+      memory: {
+        provider: "memos",
+        enabled: false,
+        base_url: "",
+        access_token: null,
+      },
+      collaboration: {
+        threads: [],
+        boards: [],
+        tasks: [],
+        sessions: [],
+        events: [],
+      },
+    };
+  }
+}
+
+function normalizeBaseUrl(value) {
+  return String(value || "").trim().replace(/\/+$/, "");
+}
+
+function looksLikeOpenMem(baseUrl) {
+  const lowered = normalizeBaseUrl(baseUrl).toLowerCase();
+  return (
+    lowered.includes("/api/openmem/") ||
+    lowered.includes("memos.memtensor.cn") ||
+    lowered.includes("openmem.net")
+  );
+}
+
+function normalizeMemoryProvider(config) {
+  const baseUrl = normalizeBaseUrl(config?.base_url);
+  const provider =
+    looksLikeOpenMem(baseUrl) ? "openmem" : String(config?.provider || "memos").trim() || "memos";
+
+  return {
+    provider,
+    enabled: Boolean(config?.enabled),
+    base_url:
+      provider === "openmem" && baseUrl && !baseUrl.endsWith("/api/openmem/v1")
+        ? `${baseUrl}/api/openmem/v1`
+        : baseUrl,
+    access_token: config?.access_token || null,
+  };
+}
+
+function authHeaders(config) {
+  if (!config.access_token) {
+    return {};
+  }
+
+  if (config.provider === "openmem") {
+    return { Authorization: `Token ${config.access_token}` };
+  }
+
+  return { Authorization: `Bearer ${config.access_token}` };
+}
+
+function parseAgentHubMemo(content) {
+  const trimmed = String(content || "").trim();
+  if (!trimmed.startsWith(AGENTHUB_MEMO_PREFIX)) return null;
+  const end = trimmed.indexOf("-->");
+  if (end === -1) return null;
+  try {
+    const meta = JSON.parse(trimmed.slice(AGENTHUB_MEMO_PREFIX.length, end).trim());
+    const body = trimmed.slice(end + 3).trim();
+    return { meta, body };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, options);
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new Error(body ? `${response.status} ${body}` : `${response.status} ${response.statusText}`);
+  }
+  return response.json();
+}
+
+function getThreadBundle(hub, threadId) {
+  const collaboration = hub?.collaboration || {};
+  const thread = (collaboration.threads || []).find((item) => item.id === threadId);
+  if (!thread) return null;
+  const board = (collaboration.boards || []).find((item) => item.id === thread.board_id);
+  const tasks = (collaboration.tasks || []).filter((item) => item.thread_id === threadId);
+  const sessions = (collaboration.sessions || []).filter((item) => item.thread_id === threadId);
+  const events = (collaboration.events || []).filter((item) => item.thread_id === threadId);
+  return {
+    thread,
+    board,
+    tasks,
+    sessions,
+    events,
+  };
+}
+
+async function weatherLookup(location, days = 5) {
+  const geo = await fetchJson(
+    `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(
+      location,
+    )}&count=1&language=zh&format=json`,
+  );
+
+  const first = geo?.results?.[0];
+  if (!first) {
+    throw new Error(`没有找到 ${location} 的天气位置`);
+  }
+
+  const forecast = await fetchJson(
+    `https://api.open-meteo.com/v1/forecast?latitude=${first.latitude}&longitude=${first.longitude}&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=${Math.min(
+      Math.max(days, 1),
+      7,
+    )}`,
+  );
+
+  const weatherCodeToText = (code) => {
+    const map = {
+      0: "晴朗",
+      1: "大致晴朗",
+      2: "局部多云",
+      3: "阴天",
+      45: "雾",
+      48: "冻雾",
+      51: "毛毛雨",
+      53: "小雨",
+      55: "中雨",
+      61: "小雨",
+      63: "中雨",
+      65: "大雨",
+      71: "小雪",
+      73: "中雪",
+      75: "大雪",
+      80: "阵雨",
+      81: "强阵雨",
+      82: "暴雨",
+      95: "雷暴",
+    };
+    return map[code] || "天气变化";
+  };
+
+  const daily = (forecast?.daily?.time || []).map((date, index) => ({
+    date,
+    high_c: forecast.daily.temperature_2m_max?.[index] ?? 0,
+    low_c: forecast.daily.temperature_2m_min?.[index] ?? 0,
+    condition: weatherCodeToText(forecast.daily.weather_code?.[index]),
+  }));
+
+  return {
+    location: `${first.name}${first.admin1 ? `, ${first.admin1}` : ""}`,
+    timezone: forecast?.timezone,
+    condition: weatherCodeToText(forecast?.current?.weather_code),
+    temperature_c: forecast?.current?.temperature_2m,
+    feels_like_c: forecast?.current?.apparent_temperature,
+    wind_speed_kmh: forecast?.current?.wind_speed_10m,
+    high_c: forecast?.daily?.temperature_2m_max?.[0],
+    low_c: forecast?.daily?.temperature_2m_min?.[0],
+    updated_at: forecast?.current?.time,
+    daily,
+  };
+}
+
+async function memorySearch(memoryConfig, queryText, threadId, limit = 5) {
+  if (!memoryConfig.enabled || !memoryConfig.base_url || !queryText.trim()) {
+    return [];
+  }
+
+  if (memoryConfig.provider === "openmem") {
+    const response = await fetchJson(`${memoryConfig.base_url}/search/memory`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeaders(memoryConfig),
+      },
+      body: JSON.stringify({
+        user_id: openMemUserId(),
+        query: queryText.trim(),
+        conversation_id: threadId || undefined,
+        filter: { app_id: OPENMEM_APP_ID },
+        memory_limit_number: Math.max(limit, 1),
+        include_preference: true,
+        preference_limit_number: 4,
+        include_tool_memory: false,
+      }),
+    });
+
+    const data = response?.data || {};
+    const detailList = Array.isArray(data.memory_detail_list) ? data.memory_detail_list : [];
+    const preferences = Array.isArray(data.preference_detail_list)
+      ? data.preference_detail_list
+      : [];
+
+    const items = detailList.map((item) => ({
+      id: item.id,
+      content: item.memory_value || item.memory_key || "",
+      scope: item.conversation_id ? "thread" : "global",
+      updated_at: item.update_time || item.create_time || null,
+      tags: item.tags || [],
+    }));
+
+    items.push(
+      ...preferences.map((item) => ({
+        id: item.id,
+        content: item.preference || "",
+        scope: item.conversation_id ? "thread" : "global",
+        updated_at: item.update_time || item.create_time || null,
+        tags: [item.preference_type].filter(Boolean),
+      })),
+    );
+
+    return items.slice(0, limit);
+  }
+
+  const payload = await fetchJson(`${memoryConfig.base_url}/api/v1/memos?pageSize=200&orderBy=display_time%20desc`, {
+    headers: authHeaders(memoryConfig),
+  });
+  const memos = Array.isArray(payload?.memos) ? payload.memos : [];
+  const lowered = queryText.trim().toLowerCase();
+
+  return memos
+    .map((memo) => {
+      const parsed = parseAgentHubMemo(memo.content);
+      if (!parsed || parsed.meta.hidden) return null;
+      return {
+        id: memo.name,
+        content: parsed.body,
+        scope: parsed.meta.scope || "global",
+        updated_at: memo.updateTime || memo.createTime || null,
+        tags: parsed.meta.tags || [],
+      };
+    })
+    .filter(Boolean)
+    .filter((item) => item.content.toLowerCase().includes(lowered))
+    .slice(0, limit);
+}
+
+function toToolResult(value) {
+  return {
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(value, null, 2),
+      },
+    ],
+  };
+}
+
+function emitRuntimeMessage(payload) {
+  process.stdout.write(`${JSON.stringify(payload)}\n`);
+}
+
+function extractAssistantText(message) {
+  const blocks = Array.isArray(message?.content) ? message.content : [];
+  return blocks
+    .filter((block) => block?.type === "text" && typeof block.text === "string")
+    .map((block) => block.text)
+    .join("")
+    .trim();
+}
+
+function buildUiPrompt(payload) {
+  return [
+    "You are answering inside AgentHub chat.",
+    "You may answer entirely in normal Markdown. Decide for yourself whether a visual widget would materially improve comprehension, scannability, or usefulness.",
+    "Only emit a widget when the answer truly benefits from a visual or interactive artifact. Do not force widgets for simple questions.",
+    "When you choose to render a widget, emit one or more Markdown fenced blocks using exactly the marker ```show-widget.",
+    "Each fence body must be valid JSON.",
+    "Preferred widget protocol:",
+    '```show-widget\\n{"title":"short title","widget_code":"<div>...</div><style>...</style><script>...</script>"}\\n```',
+    "AgentHub also understands structured card JSON for weather, memory, and task boards, but a free widget is the default richer UI path.",
+    "Use AgentHub tools whenever you need real data. Do not guess or fabricate values.",
+    "If tools do not provide enough reliable data, answer in normal Markdown instead of inventing a widget.",
+    "Widgets must be self-contained HTML/CSS/JS with no external scripts, fonts, network calls, form submission, or nested iframes.",
+    "Keep widgets responsive, visually polished, compact, and easy to scan inside a chat bubble.",
+    "Keep explanatory prose outside the widget fences in normal Markdown.",
+    "Never wrap ordinary prose in show-widget fences.",
+    payload?.threadTitle ? `Current thread title: ${payload.threadTitle}` : "",
+    payload?.agentName ? `Current acting agent: ${payload.agentName}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+async function runQuery(payload) {
+  const hub = await readHubConfig();
+  const memoryConfig = normalizeMemoryProvider(hub.memory || hub.memos || {});
+  const bundle = payload.threadId ? getThreadBundle(hub, payload.threadId) : null;
+
+  const agenthubServer = createSdkMcpServer({
+    name: "agenthub",
+    tools: [
+      tool(
+        "weather_lookup",
+        "Look up real weather and short forecast using Open-Meteo. Use when the user asks about weather, temperature, conditions, or forecast.",
+        {
+          location: z.string().min(1),
+          days: z.number().int().min(1).max(7).optional(),
+        },
+        async ({ location, days }) => toToolResult(await weatherLookup(location, days ?? 5)),
+      ),
+      tool(
+        "memory_search",
+        "Search long-term memory from the configured Memos provider. Use when you need to recall stable facts, preferences, or previous long-term notes.",
+        {
+          query: z.string().min(1),
+          thread_id: z.string().optional(),
+          limit: z.number().int().min(1).max(10).optional(),
+        },
+        async ({ query: searchQuery, thread_id, limit }) =>
+          toToolResult(await memorySearch(memoryConfig, searchQuery, thread_id || payload.threadId, limit ?? 5)),
+      ),
+      tool(
+        "task_board_read",
+        "Read the current thread board, task list, open questions, and artifacts from AgentHub.",
+        {
+          thread_id: z.string().optional(),
+        },
+        async ({ thread_id }) => {
+          const nextBundle = getThreadBundle(hub, thread_id || payload.threadId);
+          if (!nextBundle) {
+            return toToolResult({ error: "thread_not_found" });
+          }
+          return toToolResult({
+            thread: nextBundle.thread,
+            board: nextBundle.board,
+            tasks: nextBundle.tasks,
+            artifacts: nextBundle.board?.artifacts || [],
+          });
+        },
+      ),
+      tool(
+        "workspace_summary",
+        "Get a concise summary of the current thread/workspace for collaboration context.",
+        {
+          thread_id: z.string().optional(),
+        },
+        async ({ thread_id }) => {
+          const nextBundle = getThreadBundle(hub, thread_id || payload.threadId);
+          if (!nextBundle) {
+            return toToolResult({ error: "thread_not_found" });
+          }
+          return toToolResult({
+            thread_title: nextBundle.thread?.title,
+            objective: nextBundle.board?.objective,
+            current_focus: nextBundle.board?.current_focus || null,
+            summary: nextBundle.board?.summary || "",
+            open_questions: nextBundle.board?.open_questions || [],
+            key_files: nextBundle.board?.key_files || [],
+            tasks: (nextBundle.tasks || []).map((task) => ({
+              title: task.title,
+              status: task.status,
+              priority: task.priority,
+              assigned_agent_id: task.assigned_agent_id || null,
+            })),
+          });
+        },
+      ),
+    ],
+  });
+
+  const toolsUsed = new Set();
+  let sessionId = payload.runtimeSessionId || null;
+  let lastAssistantText = "";
+  let streamedText = "";
+  let model = null;
+  let resultUsage = null;
+  let turns = null;
+
+  const stream = query({
+    prompt: payload.prompt,
+    options: {
+      cwd: payload.cwd || process.cwd(),
+      model: payload.model || undefined,
+      tools: {
+        type: "preset",
+        preset: "claude_code",
+      },
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+      maxTurns: payload.maxTurns || 10,
+      resume: payload.runtimeSessionId || undefined,
+      persistSession: true,
+      includePartialMessages: true,
+      systemPrompt: {
+        type: "preset",
+        preset: "claude_code",
+        append: buildUiPrompt({
+          threadTitle: bundle?.thread?.title,
+          agentName: payload.agentName,
+        }),
+      },
+      mcpServers: {
+        agenthub: agenthubServer,
+      },
+      env: {
+        ...process.env,
+        CLAUDE_AGENT_SDK_CLIENT_APP: "agenthub/0.1.0",
+      },
+      stderr(data) {
+        process.stderr.write(data);
+      },
+    },
+  });
+
+  for await (const message of stream) {
+    if (message && typeof message === "object" && "session_id" in message && message.session_id) {
+      sessionId = message.session_id;
+    }
+
+    if (message?.type === "stream_event") {
+      const streamEvent = message.event;
+      if (
+        streamEvent?.type === "content_block_delta" &&
+        streamEvent?.delta?.type === "text_delta" &&
+        typeof streamEvent.delta.text === "string"
+      ) {
+        streamedText += streamEvent.delta.text;
+        if (payload.requestId) {
+          emitRuntimeMessage({
+            type: "partial",
+            requestId: payload.requestId,
+            rawText: streamedText,
+            runtimeSessionId: sessionId,
+          });
+        }
+      }
+    }
+
+    if (message?.type === "system" && message.subtype === "init") {
+      model = message.model || model;
+    }
+
+    if (message?.type === "assistant") {
+      const text = extractAssistantText(message.message);
+      if (text) {
+        lastAssistantText = text;
+        if (!streamedText && payload.requestId) {
+          emitRuntimeMessage({
+            type: "partial",
+            requestId: payload.requestId,
+            rawText: text,
+            runtimeSessionId: sessionId,
+          });
+        }
+      }
+    }
+
+    if (message?.type === "tool_use_summary") {
+      for (const toolUseId of message.preceding_tool_use_ids || []) {
+        toolsUsed.add(toolUseId);
+      }
+    }
+
+    if (message?.type === "result") {
+      turns = message.num_turns ?? turns;
+      resultUsage = message.usage ?? resultUsage;
+      if (!lastAssistantText && typeof message.result === "string") {
+        lastAssistantText = message.result.trim();
+      }
+    }
+  }
+
+  return {
+    rawText: lastAssistantText || streamedText || "（无回复）",
+    runtimeSessionId: sessionId,
+    metadata: {
+      model,
+      toolsUsed: [...toolsUsed],
+      turnCount: turns,
+      usage: resultUsage,
+    },
+  };
+}
+
+async function main() {
+  const raw = await readStdin();
+  const payload = raw.trim() ? JSON.parse(raw) : {};
+
+  try {
+    let result;
+    try {
+      result = await runQuery(payload);
+    } catch (error) {
+      if (payload.runtimeSessionId) {
+        result = await runQuery({
+          ...payload,
+          runtimeSessionId: null,
+        });
+      } else {
+        throw error;
+      }
+    }
+
+    emitRuntimeMessage({
+      type: "final",
+      success: true,
+      ...result,
+    });
+  } catch (error) {
+    process.stderr.write(`${error?.stack || error}\n`);
+    emitRuntimeMessage({
+      type: "final",
+      success: false,
+      error: String(error?.message || error),
+      rawText: "",
+      runtimeSessionId: payload.runtimeSessionId || null,
+      requestId: payload.requestId || null,
+    });
+    process.exitCode = 1;
+  }
+}
+
+await main();
