@@ -1,5 +1,7 @@
 # AgentHub
 
+[中文说明](./docs/README.zh-CN.md)
+
 AgentHub is a local-first desktop console for managing and working with multiple AI agents.
 
 It combines:
