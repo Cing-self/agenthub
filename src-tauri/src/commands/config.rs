@@ -111,6 +111,26 @@ pub fn read_hub_config() -> Result<Value, String> {
             "models": [],
             "mcpServers": [],
             "secrets": [],
+            "channels": {
+                "feishu": {
+                    "enabled": false,
+                    "transport": "websocket",
+                    "defaultAccountId": null,
+                    "policy": {
+                        "dmPolicy": "allow",
+                        "groupPolicy": "mentions-only",
+                        "requireMention": true,
+                        "allowedChatIds": [],
+                        "allowedUserIds": []
+                    },
+                    "route": {
+                        "defaultAgentId": "dolphin",
+                        "defaultThreadId": null,
+                        "threadMode": "thread-per-chat"
+                    },
+                    "accounts": {}
+                }
+            },
             "customAgents": [
                 {
                     "id": "dolphin",
@@ -120,10 +140,14 @@ pub fn read_hub_config() -> Result<Value, String> {
                         "runtime_family": "claude-code",
                         "auth_source": "claude-subscription",
                         "default_model": null
-                    }
+                    },
+                    "model_ids": [],
+                    "mcp_server_ids": [],
+                    "skill_directories": []
                 }
             ],
             "skills": { "directories": [] },
+            "cronJobs": [],
             "memory": {
                 "provider": "memos",
                 "enabled": false,
@@ -156,7 +180,7 @@ pub fn write_hub_config_module(module: String, data: Value) -> Result<(), String
     let content = if path.exists() {
         fs::read_to_string(&path).map_err(|e| format!("Failed to read hub config: {}", e))?
     } else {
-        r#"{"providers":[],"models":[],"mcpServers":[],"secrets":[],"customAgents":[{"id":"dolphin","name":"dolphin","icon":"🐬","runtime_profile":{"runtime_family":"claude-code","auth_source":"claude-subscription","default_model":null}}],"skills":{"directories":[]},"memory":{"provider":"memos","enabled":false,"base_url":"","access_token":null},"collaboration":{"connectors":[],"threads":[],"boards":[],"tasks":[],"sessions":[],"events":[],"routes":[]}}"#.to_string()
+        r#"{"providers":[],"models":[],"mcpServers":[],"secrets":[],"channels":{"feishu":{"enabled":false,"transport":"websocket","defaultAccountId":null,"policy":{"dmPolicy":"allow","groupPolicy":"mentions-only","requireMention":true,"allowedChatIds":[],"allowedUserIds":[]},"route":{"defaultAgentId":"dolphin","defaultThreadId":null,"threadMode":"thread-per-chat"},"accounts":{}}},"customAgents":[{"id":"dolphin","name":"dolphin","icon":"🐬","runtime_profile":{"runtime_family":"claude-code","auth_source":"claude-subscription","default_model":null},"model_ids":[],"mcp_server_ids":[],"skill_directories":[]}],"skills":{"directories":[]},"cronJobs":[],"memory":{"provider":"memos","enabled":false,"base_url":"","access_token":null},"collaboration":{"connectors":[],"threads":[],"boards":[],"tasks":[],"sessions":[],"events":[],"routes":[]}}"#.to_string()
     };
 
     let mut config: Value = serde_json::from_str(&content)

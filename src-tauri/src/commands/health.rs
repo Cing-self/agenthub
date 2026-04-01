@@ -1,7 +1,9 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::path::PathBuf;
 use std::process::Command;
 use sysinfo::System;
+
+use super::custom_agents::{read_custom_agents, CustomAgentConfig, RuntimeProfile};
 
 // ── Agent Instance (auto-detected) ────────────────────
 
@@ -20,13 +22,6 @@ pub struct DetectedAgent {
     pub version: Option<String>,
     pub runtime_profile: Option<RuntimeProfile>,
     pub details: AgentDetails,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub struct RuntimeProfile {
-    pub runtime_family: String,
-    pub auth_source: Option<String>,
-    pub default_model: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -65,6 +60,9 @@ pub enum AgentDetails {
         based_on_runtime: String,
         auth_source: Option<String>,
         default_model: Option<String>,
+        model_count: usize,
+        mcp_server_count: usize,
+        skill_directory_count: usize,
     },
 }
 
@@ -124,14 +122,6 @@ struct ClawVariant {
     config_filename: &'static str,    // usually "openclaw.json" or "settings.json"
     process_keywords: Vec<&'static str>,
     app_path: Option<&'static str>,
-}
-
-#[derive(Deserialize, Clone, Debug)]
-struct CustomAgentConfig {
-    id: String,
-    name: String,
-    icon: Option<String>,
-    runtime_profile: RuntimeProfile,
 }
 
 fn claw_variants() -> Vec<ClawVariant> {
@@ -616,37 +606,6 @@ fn detect_opencode(sys: &System) -> Option<DetectedAgent> {
     })
 }
 
-fn default_custom_agents() -> Vec<CustomAgentConfig> {
-    vec![CustomAgentConfig {
-        id: "dolphin".to_string(),
-        name: "dolphin".to_string(),
-        icon: Some("🐬".to_string()),
-        runtime_profile: RuntimeProfile {
-            runtime_family: "claude-code".to_string(),
-            auth_source: Some("claude-subscription".to_string()),
-            default_model: None,
-        },
-    }]
-}
-
-fn read_custom_agents() -> Vec<CustomAgentConfig> {
-    let hub = match super::config::read_hub_config() {
-        Ok(value) => value,
-        Err(_) => return default_custom_agents(),
-    };
-
-    let custom_agents = hub
-        .get("customAgents")
-        .and_then(|value| serde_json::from_value::<Vec<CustomAgentConfig>>(value.clone()).ok())
-        .unwrap_or_default();
-
-    if custom_agents.is_empty() {
-        default_custom_agents()
-    } else {
-        custom_agents
-    }
-}
-
 fn derive_runtime_health_template<'a>(
     agents: &'a [DetectedAgent],
     runtime_family: &str,
@@ -687,6 +646,17 @@ fn build_custom_agent(config: &CustomAgentConfig, runtime_template: Option<&Dete
             based_on_runtime: runtime_family,
             auth_source: config.runtime_profile.auth_source.clone(),
             default_model: config.runtime_profile.default_model.clone(),
+            model_count: config.model_ids.as_ref().map(|items| items.len()).unwrap_or(0),
+            mcp_server_count: config
+                .mcp_server_ids
+                .as_ref()
+                .map(|items| items.len())
+                .unwrap_or(0),
+            skill_directory_count: config
+                .skill_directories
+                .as_ref()
+                .map(|items| items.len())
+                .unwrap_or(0),
         },
     }
 }

@@ -43,6 +43,23 @@ export default function SkillsPage() {
   const [isSearchMode, setIsSearchMode] = useState(false);
   const [installing, setInstalling] = useState<string | null>(null);
 
+  const syncDolphinSkills = async () => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("sync_custom_agent_resources", {
+        id: "dolphin",
+        includeModels: false,
+        includeMcpServers: false,
+        includeSkills: true,
+      });
+      const { useAgentsStore } = await import("@/stores/agents-store");
+      await useAgentsStore.getState().refresh();
+      toast.success("已把 Skills 目录同步到 dolphin");
+    } catch (error) {
+      toast.error(`同步到 dolphin 失败: ${error}`);
+    }
+  };
+
   const installSkill = async (slug: string) => {
     setInstalling(slug);
     try {
@@ -92,9 +109,19 @@ export default function SkillsPage() {
   return (
     <div className="space-y-5 max-w-3xl pb-8">
       {/* Header */}
-      <div>
-        <h1 className="text-lg font-semibold">Skills 市场</h1>
-        <p className="text-[13px] text-muted-foreground mt-0.5">搜索和浏览 ClawHub 上的 Skills</p>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-lg font-semibold">Skills 市场</h1>
+          <p className="text-[13px] text-muted-foreground mt-0.5">搜索和浏览 ClawHub 上的 Skills</p>
+        </div>
+        <button
+          onClick={() => {
+            void syncDolphinSkills();
+          }}
+          className="inline-flex items-center gap-1.5 rounded-full border border-border/70 px-3 py-1.5 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+        >
+          同步到 dolphin
+        </button>
       </div>
 
       {/* Search */}

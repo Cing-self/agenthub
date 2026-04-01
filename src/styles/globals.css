@@ -51,6 +51,12 @@
   --sidebar-fg: #b0b0b0;
   --sidebar-accent: rgba(96, 165, 250, 0.08);
   --sidebar-border: #1f1f1f;
+  --window-bg: #0f0f0f;
+  --window-chrome: rgba(18, 18, 18, 0.94);
+  --window-sidebar: #131313;
+  --surface-muted: rgba(255, 255, 255, 0.05);
+  --card-elevated: rgba(28, 28, 28, 0.92);
+  --border-soft: rgba(255, 255, 255, 0.08);
 }
 
 /* ── Light theme — warm, inspired by AutoClaw ── */
@@ -72,6 +78,19 @@
   --sidebar-fg: #6a6058;
   --sidebar-accent: rgba(232, 101, 51, 0.1);
   --sidebar-border: #e5dfd8;
+  --window-bg: #f6f3ee;
+  --window-chrome: rgba(246, 243, 238, 0.96);
+  --window-sidebar: #efeae2;
+  --surface-muted: rgba(42, 37, 32, 0.05);
+  --card-elevated: rgba(255, 255, 255, 0.84);
+  --border-soft: rgba(42, 37, 32, 0.1);
+}
+
+html, body, #root {
+  width: 100%;
+  min-height: 100%;
+  background-color: var(--window-bg);
+  color: var(--fg);
 }
 
 body {
@@ -94,6 +113,7 @@ body {
   height: 100vh;
   display: flex;
   flex-direction: column;
+  background-color: var(--window-bg);
 }
 
 /* ── Scrollbar: fully hidden ── */
@@ -119,12 +139,9 @@ input, textarea {
 
 /* ── Unified card style — apply glass to all .bg-card elements ── */
 .bg-card {
-  background: rgba(255, 255, 255, 0.55) !important;
+  background: var(--card-elevated) !important;
   backdrop-filter: blur(12px) saturate(1.3);
   -webkit-backdrop-filter: blur(12px) saturate(1.3);
-}
-.dark .bg-card {
-  background: rgba(30, 30, 30, 0.6) !important;
 }
 
 /* Rounded corners upgrade for all bordered cards */
@@ -132,69 +149,41 @@ input, textarea {
   border-radius: 1rem;
 }
 .border-border {
-  border-color: rgba(255, 255, 255, 0.35);
-}
-.dark .border-border {
-  border-color: rgba(255, 255, 255, 0.06);
+  border-color: var(--border-soft);
 }
 
 /* Tone down primary-colored icon badges in page headers */
 .bg-primary\/10 {
-  background: rgba(0, 0, 0, 0.04) !important;
-}
-.dark .bg-primary\/10 {
-  background: rgba(255, 255, 255, 0.06) !important;
+  background: color-mix(in srgb, var(--primary) 12%, transparent) !important;
 }
 
 /* ── Glassmorphism utilities ── */
 .glass {
-  background: rgba(255, 255, 255, 0.6);
+  background: color-mix(in srgb, var(--card) 72%, transparent);
   backdrop-filter: blur(16px) saturate(1.4);
   -webkit-backdrop-filter: blur(16px) saturate(1.4);
-  border: 1px solid rgba(255, 255, 255, 0.5);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 0 0 1px rgba(0, 0, 0, 0.02);
-}
-.dark .glass {
-  background: rgba(30, 30, 30, 0.65);
-  backdrop-filter: blur(16px) saturate(1.3);
-  -webkit-backdrop-filter: blur(16px) saturate(1.3);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2), 0 0 0 1px rgba(0, 0, 0, 0.1);
+  border: 1px solid var(--border-soft);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.03);
 }
 
 .glass-subtle {
-  background: rgba(255, 255, 255, 0.35);
+  background: color-mix(in srgb, var(--card) 55%, transparent);
   backdrop-filter: blur(10px) saturate(1.2);
   -webkit-backdrop-filter: blur(10px) saturate(1.2);
-  border: 1px solid rgba(255, 255, 255, 0.3);
-}
-.dark .glass-subtle {
-  background: rgba(30, 30, 30, 0.4);
-  backdrop-filter: blur(10px) saturate(1.2);
-  -webkit-backdrop-filter: blur(10px) saturate(1.2);
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-soft);
 }
 
 .glass-input {
-  background: rgba(255, 255, 255, 0.55);
+  background: color-mix(in srgb, var(--card) 70%, transparent);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
-  border: 1px solid rgba(255, 255, 255, 0.45);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03) inset;
-}
-.dark .glass-input {
-  background: rgba(40, 40, 40, 0.55);
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  border: 1px solid var(--border-soft);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15) inset;
 }
 
 .glass-tag {
-  background: rgba(255, 255, 255, 0.45);
+  background: color-mix(in srgb, var(--card) 64%, transparent);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
-  border: 1px solid rgba(255, 255, 255, 0.35);
-}
-.dark .glass-tag {
-  background: rgba(50, 50, 50, 0.5);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border-soft);
 }

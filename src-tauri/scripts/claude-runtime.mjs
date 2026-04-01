@@ -122,6 +122,85 @@ async function fetchJson(url, options = {}) {
   return response.json();
 }
 
+function parseGitHubRepoRef(input) {
+  const source = String(input || "").trim();
+  if (!source) return null;
+
+  const urlMatch = source.match(/github\.com\/([^/\s]+)\/([^/\s#?]+)/i);
+  if (urlMatch) {
+    return {
+      owner: urlMatch[1],
+      repo: urlMatch[2].replace(/\.git$/i, ""),
+    };
+  }
+
+  const shortMatch = source.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/);
+  if (shortMatch) {
+    return {
+      owner: shortMatch[1],
+      repo: shortMatch[2],
+    };
+  }
+
+  return null;
+}
+
+async function githubRepoOverview(repoInput) {
+  const parsed = parseGitHubRepoRef(repoInput);
+  if (!parsed) {
+    throw new Error("无法识别 GitHub 仓库地址，请提供完整 GitHub URL 或 owner/repo。");
+  }
+
+  const { owner, repo } = parsed;
+  const headers = {
+    Accept: "application/vnd.github+json",
+    "User-Agent": "agenthub-runtime",
+  };
+
+  const [repoData, languages, contents] = await Promise.all([
+    fetchJson(`https://api.github.com/repos/${owner}/${repo}`, { headers }),
+    fetchJson(`https://api.github.com/repos/${owner}/${repo}/languages`, { headers }).catch(() => ({})),
+    fetchJson(`https://api.github.com/repos/${owner}/${repo}/contents`, { headers }).catch(() => []),
+  ]);
+
+  const languageEntries = Object.entries(languages || {});
+  const totalBytes = languageEntries.reduce((sum, [, bytes]) => sum + Number(bytes || 0), 0);
+
+  return {
+    full_name: repoData.full_name,
+    description: repoData.description || "",
+    html_url: repoData.html_url,
+    default_branch: repoData.default_branch,
+    created_at: repoData.created_at,
+    updated_at: repoData.updated_at,
+    pushed_at: repoData.pushed_at,
+    language: repoData.language,
+    stargazers_count: repoData.stargazers_count,
+    forks_count: repoData.forks_count,
+    subscribers_count: repoData.subscribers_count,
+    open_issues_count: repoData.open_issues_count,
+    watchers_count: repoData.watchers_count,
+    size_kb: repoData.size,
+    archived: Boolean(repoData.archived),
+    topics: Array.isArray(repoData.topics) ? repoData.topics : [],
+    license: repoData.license?.spdx_id || repoData.license?.name || null,
+    languages: languageEntries
+      .sort((a, b) => Number(b[1] || 0) - Number(a[1] || 0))
+      .slice(0, 6)
+      .map(([name, bytes]) => ({
+        name,
+        bytes,
+        pct: totalBytes > 0 ? Number(((Number(bytes || 0) / totalBytes) * 100).toFixed(1)) : 0,
+      })),
+    top_level: Array.isArray(contents)
+      ? contents.slice(0, 12).map((item) => ({
+          name: item.name,
+          type: item.type,
+        }))
+      : [],
+  };
+}
+
 function getThreadBundle(hub, threadId) {
   const collaboration = hub?.collaboration || {};
   const thread = (collaboration.threads || []).find((item) => item.id === threadId);
@@ -314,9 +393,22 @@ function buildUiPrompt(payload) {
     '```show-widget\\n{"title":"short title","widget_code":"<div>...</div><style>...</style><script>...</script>"}\\n```',
     "AgentHub also understands structured card JSON for weather, memory, and task boards, but a free widget is the default richer UI path.",
     "Use AgentHub tools whenever you need real data. Do not guess or fabricate values.",
+    "When a widget contains concrete external facts, metrics, dates, repo metadata, weather values, memory items, or task state, you must call the relevant AgentHub tool in the same turn before emitting that widget.",
+    "For weather, repository snapshots, memory recall, and task/workspace summaries, always use the matching AgentHub tool before showing exact numbers or specific factual claims.",
+    "If you did not call a relevant tool, do not emit a factual widget. Fall back to normal Markdown and be honest about uncertainty.",
     "If tools do not provide enough reliable data, answer in normal Markdown instead of inventing a widget.",
     "Widgets must be self-contained HTML/CSS/JS with no external scripts, fonts, network calls, form submission, or nested iframes.",
-    "Keep widgets responsive, visually polished, compact, and easy to scan inside a chat bubble.",
+    "Default to a light, low-chrome, embedded visual style that blends into a white chat surface. Avoid heavy dark dashboards, giant canvases, thick outer frames, ornamental borders, and giant empty areas unless the user explicitly asks for them.",
+    "Aim for polished embedded cards, mini dashboards, compact charts, or tidy comparison views that feel native to chat instead of full-screen app mockups.",
+    "Use the provided CSS variables such as --widget-bg, --widget-fg, --widget-muted, --widget-border, --widget-accent, --widget-surface, and --widget-surface-strong when styling widgets.",
+    "Let AgentHub provide most of the outer chrome. Prefer transparent or very light widget roots over full-bleed dark backgrounds.",
+    "Keep widgets responsive, visually polished, compact, and easy to scan inside a chat bubble. A typical widget should usually fit within roughly 220 to 420 px height unless the content clearly needs more room.",
+    "If the widget already communicates the answer, keep any prose outside the widget extremely brief and non-redundant. One short lead-in or one short takeaway is enough.",
+    "Do not repeat the same metrics in a long paragraph right below the widget unless extra explanation is genuinely helpful.",
+    "Do not append Markdown tables, full metric dumps, or long bullet lists after a widget unless the user explicitly asks for a table or detailed text report.",
+    "Do not narrate the UI choice. Never say things like '我来渲染一个卡片', '下面是可视化', '我做了一个小组件', or describe the rendering process. If you choose a widget, output it directly.",
+    "Do not mention internal words such as widget, card, visualization, render, or component in user-facing prose unless the user explicitly asks about implementation.",
+    "Do not write internal labels such as context sync, current thread, latest shared context, acting agent, or other implementation wording in user-facing output.",
     "Keep explanatory prose outside the widget fences in normal Markdown.",
     "Never wrap ordinary prose in show-widget fences.",
     payload?.threadTitle ? `Current thread title: ${payload.threadTitle}` : "",
@@ -330,6 +422,7 @@ async function runQuery(payload) {
   const hub = await readHubConfig();
   const memoryConfig = normalizeMemoryProvider(hub.memory || hub.memos || {});
   const bundle = payload.threadId ? getThreadBundle(hub, payload.threadId) : null;
+  const invokedTools = new Set();
 
   const agenthubServer = createSdkMcpServer({
     name: "agenthub",
@@ -341,7 +434,10 @@ async function runQuery(payload) {
           location: z.string().min(1),
           days: z.number().int().min(1).max(7).optional(),
         },
-        async ({ location, days }) => toToolResult(await weatherLookup(location, days ?? 5)),
+        async ({ location, days }) => {
+          invokedTools.add("weather_lookup");
+          return toToolResult(await weatherLookup(location, days ?? 5));
+        },
       ),
       tool(
         "memory_search",
@@ -351,8 +447,10 @@ async function runQuery(payload) {
           thread_id: z.string().optional(),
           limit: z.number().int().min(1).max(10).optional(),
         },
-        async ({ query: searchQuery, thread_id, limit }) =>
-          toToolResult(await memorySearch(memoryConfig, searchQuery, thread_id || payload.threadId, limit ?? 5)),
+        async ({ query: searchQuery, thread_id, limit }) => {
+          invokedTools.add("memory_search");
+          return toToolResult(await memorySearch(memoryConfig, searchQuery, thread_id || payload.threadId, limit ?? 5));
+        },
       ),
       tool(
         "task_board_read",
@@ -361,6 +459,7 @@ async function runQuery(payload) {
           thread_id: z.string().optional(),
         },
         async ({ thread_id }) => {
+          invokedTools.add("task_board_read");
           const nextBundle = getThreadBundle(hub, thread_id || payload.threadId);
           if (!nextBundle) {
             return toToolResult({ error: "thread_not_found" });
@@ -380,6 +479,7 @@ async function runQuery(payload) {
           thread_id: z.string().optional(),
         },
         async ({ thread_id }) => {
+          invokedTools.add("workspace_summary");
           const nextBundle = getThreadBundle(hub, thread_id || payload.threadId);
           if (!nextBundle) {
             return toToolResult({ error: "thread_not_found" });
@@ -398,6 +498,17 @@ async function runQuery(payload) {
               assigned_agent_id: task.assigned_agent_id || null,
             })),
           });
+        },
+      ),
+      tool(
+        "github_repo_overview",
+        "Fetch real GitHub repository metadata, language mix, and top-level structure. Use when the user asks to analyze a GitHub repository, mentions a repo URL, or wants repository stats and a project snapshot.",
+        {
+          repo: z.string().min(1),
+        },
+        async ({ repo }) => {
+          invokedTools.add("github_repo_overview");
+          return toToolResult(await githubRepoOverview(repo));
         },
       ),
     ],
@@ -479,7 +590,8 @@ async function runQuery(payload) {
       const text = extractAssistantText(message.message);
       if (text) {
         lastAssistantText = text;
-        if (!streamedText && payload.requestId) {
+        if (payload.requestId && text !== streamedText) {
+          streamedText = text;
           emitRuntimeMessage({
             type: "partial",
             requestId: payload.requestId,
@@ -490,10 +602,8 @@ async function runQuery(payload) {
       }
     }
 
-    if (message?.type === "tool_use_summary") {
-      for (const toolUseId of message.preceding_tool_use_ids || []) {
-        toolsUsed.add(toolUseId);
-      }
+    if (message?.type === "tool_progress" && typeof message.tool_name === "string") {
+      toolsUsed.add(message.tool_name);
     }
 
     if (message?.type === "result") {
@@ -510,7 +620,7 @@ async function runQuery(payload) {
     runtimeSessionId: sessionId,
     metadata: {
       model,
-      toolsUsed: [...toolsUsed],
+      toolsUsed: [...new Set([...toolsUsed, ...invokedTools])],
       turnCount: turns,
       usage: resultUsage,
     },

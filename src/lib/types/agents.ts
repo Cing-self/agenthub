@@ -35,6 +35,9 @@ export interface CustomAgentDetails {
   based_on_runtime: string;
   auth_source?: string | null;
   default_model?: string | null;
+  model_count: number;
+  mcp_server_count: number;
+  skill_directory_count: number;
 }
 
 export type AgentDetails =

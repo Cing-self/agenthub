@@ -3,9 +3,8 @@ import { useSearchParams } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Check, Loader2, Pencil, Plus, X } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
-import { AgentSwitchRail } from "@/components/agents/AgentSwitchRail";
 import { MessageBlocksRenderer } from "@/components/chat/MessageBlocksRenderer";
 import { parseMessageContent } from "@/lib/chat/message-blocks";
 import { getRuntimeAdapter, getRuntimeSessionMode, usesNativeRuntimeSession } from "@/lib/runtime";
@@ -44,6 +43,44 @@ function formatThreadTitle(input: string) {
   }
 
   return trimmed.length > 24 ? `${trimmed.slice(0, 24)}…` : trimmed;
+}
+
+function shouldShowComposerPreview(source: string) {
+  const trimmed = source.trim();
+  if (!trimmed) return false;
+
+  if (source.includes("\n")) return true;
+
+  return /(^|\s)([#>*`-]|\d+\.)/.test(source);
+}
+
+function parseAgentSwitchCommand(source: string) {
+  const trimmed = source.trim();
+  if (!trimmed.startsWith("/agent")) return null;
+
+  const rawTarget = trimmed.replace(/^\/agent\b/i, "").trim();
+  const target = rawTarget.startsWith("->") ? rawTarget.slice(2).trim() : rawTarget;
+
+  return {
+    target,
+  };
+}
+
+function findAgentByCommand(target: string, agents: Array<{ id: string; name: string }>) {
+  const normalized = target.trim().toLowerCase();
+  if (!normalized) return null;
+
+  const exact = agents.find(
+    (agent) => agent.id.toLowerCase() === normalized || agent.name.toLowerCase() === normalized,
+  );
+  if (exact) return exact;
+
+  return (
+    agents.find(
+      (agent) =>
+        agent.id.toLowerCase().includes(normalized) || agent.name.toLowerCase().includes(normalized),
+    ) ?? null
+  );
 }
 
 function formatContextPrompt(
@@ -152,7 +189,6 @@ export default function ChatPage() {
     loadThreads,
     selectThread,
     createThread,
-    renameThread,
     setPrimaryAgent,
     saveBoard,
   } = useCollaborationStore();
@@ -160,11 +196,8 @@ export default function ChatPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [messageMap, setMessageMap] = useState<Record<string, Message[]>>({});
   const [input, setInput] = useState("");
-  const [composerMode, setComposerMode] = useState<"edit" | "preview">("edit");
   const [sending, setSending] = useState(false);
   const [sendingLabel, setSendingLabel] = useState("");
-  const [isRenamingThread, setIsRenamingThread] = useState(false);
-  const [renameTitle, setRenameTitle] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -174,6 +207,8 @@ export default function ChatPage() {
 
   const requestedAgentId = searchParams.get("agent") ?? "";
   const requestedThreadId = searchParams.get("thread") ?? "";
+  const activeAgents = agents.filter((item) => item.running);
+  const visibleAgents = activeAgents.length > 0 ? activeAgents : agents;
 
   const fallbackThreadId = threads.some((thread) => thread.id === storeSelectedThreadId)
     ? storeSelectedThreadId ?? ""
@@ -184,20 +219,20 @@ export default function ChatPage() {
   const currentThread = threads.find((thread) => thread.id === selectedThreadId);
 
   const fallbackAgentId =
+    visibleAgents.find((item) => item.id === "dolphin")?.id ||
     (currentThread?.primary_agent_id &&
-    agents.some((item) => item.id === currentThread.primary_agent_id)
+    visibleAgents.some((item) => item.id === currentThread.primary_agent_id)
       ? currentThread.primary_agent_id
       : null) ||
-    agents.find((item) => item.running)?.id ||
-    agents[0]?.id ||
+    visibleAgents[0]?.id ||
     "";
-  const selectedAgentId = agents.some((item) => item.id === requestedAgentId)
+  const selectedAgentId = visibleAgents.some((item) => item.id === requestedAgentId)
     ? requestedAgentId
     : fallbackAgentId;
 
   const activeBucket = selectedThreadId || DRAFT_BUCKET;
   const messages = messageMap[activeBucket] ?? [];
-  const agent = agents.find((item) => item.id === selectedAgentId);
+  const agent = visibleAgents.find((item) => item.id === selectedAgentId);
   const currentSession = currentBundle?.sessions.find((session) => session.agent_id === selectedAgentId);
 
   useEffect(() => {
@@ -224,11 +259,6 @@ export default function ChatPage() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, selectedThreadId]);
-
-  useEffect(() => {
-    setRenameTitle(currentThread?.title ?? "");
-    setIsRenamingThread(false);
-  }, [currentThread?.id, currentThread?.title]);
 
   useEffect(() => {
     if (!currentBundle) return;
@@ -321,7 +351,7 @@ export default function ChatPage() {
       const session = await invoke<{ id: string }>("ensure_thread_session", {
         threadId: selectedThreadId,
         agentId,
-        mode: getRuntimeSessionMode(agents.find((item) => item.id === agentId) ?? null),
+        mode: getRuntimeSessionMode(visibleAgents.find((item) => item.id === agentId) ?? null),
         runtimeSessionId: null,
       });
       await invoke("record_thread_event", {
@@ -343,56 +373,24 @@ export default function ChatPage() {
     }
   };
 
-  const handleThreadChange = async (threadId: string) => {
-    const nextThread = threads.find((thread) => thread.id === threadId);
-    const nextAgentId =
-      (nextThread?.primary_agent_id &&
-      agents.some((item) => item.id === nextThread.primary_agent_id)
-        ? nextThread.primary_agent_id
-        : selectedAgentId) || undefined;
-    updateParams({ threadId, agentId: nextAgentId });
-    await selectThread(threadId);
-    inputRef.current?.focus();
-  };
-
-  const handleQuickThreadCreate = async () => {
-    try {
-      const bundle = await createThread({
-        title: formatThreadTitle(input),
-        goal: input.trim(),
-        primaryAgentId: selectedAgentId || undefined,
-      });
-      updateParams({ threadId: bundle.thread.id, agentId: selectedAgentId });
-      toast.success("已创建新的任务线");
-      inputRef.current?.focus();
-    } catch {
-      toast.error("创建任务线失败");
-    }
-  };
-
-  const handleThreadRename = async () => {
-    if (!currentThread) return;
-    const nextTitle = renameTitle.trim();
-    if (!nextTitle) {
-      toast.error("任务线名称不能为空");
-      return;
-    }
-    if (nextTitle === currentThread.title) {
-      setIsRenamingThread(false);
-      return;
-    }
-
-    try {
-      await renameThread(currentThread.id, nextTitle);
-      toast.success("任务线名称已更新");
-      setIsRenamingThread(false);
-    } catch {
-      toast.error("更新任务线名称失败");
-    }
-  };
-
   const send = async () => {
     if (!input.trim() || !selectedAgentId || sending) return;
+    const switchCommand = parseAgentSwitchCommand(input);
+    if (switchCommand) {
+      const nextAgent = findAgentByCommand(switchCommand.target, visibleAgents);
+      if (!switchCommand.target) {
+        toast.message(`可切换到：${visibleAgents.map((item) => item.name).join(" / ")}`);
+        return;
+      }
+      if (!nextAgent) {
+        toast.error(`没有找到 Agent：${switchCommand.target}`);
+        return;
+      }
+      setInput("");
+      await handleAgentChange(nextAgent.id);
+      toast.success(`已切换到 ${nextAgent.name}`);
+      return;
+    }
 
     const threadId = await ensureThreadForChat();
     const userContent = input.trim();
@@ -437,18 +435,11 @@ export default function ChatPage() {
       });
     }
     setInput("");
-    setComposerMode("edit");
     setSending(true);
     setSendingLabel(
-      isAgentSwitch
-        ? `正在切换到 ${agentName} 并同步上下文...`
-        : needsNativeBootstrap
-          ? `正在为 ${agentName} 初始化会话...`
-          : needsNativeBoardSync
-            ? `正在同步共享上下文并交给 ${agentName} 处理...`
-            : !runtimeUsesNativeSession
-              ? `正在整理必要上下文并交给 ${agentName} 处理...`
-              : `正在交给 ${agentName} 处理...`,
+      isAgentSwitch || needsNativeBootstrap || needsNativeBoardSync || !runtimeUsesNativeSession
+        ? `${agentName} 正在思考...`
+        : `${agentName} 正在回复...`,
     );
 
     let stopStreamListener: (() => void) | null = null;
@@ -460,6 +451,9 @@ export default function ChatPage() {
           if (event.payload.requestId !== requestId) return;
 
           const partialRawText = event.payload.rawText || "";
+          if (partialRawText.trim()) {
+            setSendingLabel("");
+          }
           const parsedPartial = parseMessageContent(partialRawText);
 
           updateMessage(threadId, streamingAssistantId, (message) => ({
@@ -619,129 +613,11 @@ export default function ChatPage() {
     }
   };
 
+  const showComposerPreview = shouldShowComposerPreview(input);
+  const agentSwitchCommand = parseAgentSwitchCommand(input);
+
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="sticky top-0 z-20 mx-auto w-full max-w-4xl shrink-0 pb-3">
-        <div className="inline-flex max-w-full flex-wrap items-center gap-1.5 rounded-[18px] border border-white/45 bg-white/80 p-1.5 shadow-[0_20px_56px_-42px_rgba(83,48,26,0.45)] backdrop-blur dark:border-white/8 dark:bg-white/[0.05]">
-          <button
-            onClick={() => {
-              void handleQuickThreadCreate();
-            }}
-            className="flex h-8 w-8 items-center justify-center rounded-full bg-foreground text-background transition-colors hover:opacity-90"
-            title="创建新任务线"
-          >
-            <Plus size={14} />
-          </button>
-
-          <div className="h-6 w-px bg-black/8 dark:bg-white/10" />
-
-          <div className="inline-flex items-center gap-2 rounded-[14px] border border-black/6 bg-white/78 px-2 py-1 dark:border-white/8 dark:bg-white/[0.04]">
-            <span className="shrink-0 text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
-              Agent
-            </span>
-            <AgentSwitchRail
-              agents={agents}
-              selectedAgentId={selectedAgentId}
-              onSelectAgent={(agentId) => {
-                void handleAgentChange(agentId);
-              }}
-              className="min-w-[132px] max-w-[180px] appearance-none rounded-[10px] border border-black/8 bg-white/82 px-3 py-1.5 text-[13px] font-medium outline-none transition-colors hover:border-black/12 focus:border-foreground/20 disabled:opacity-50 dark:border-white/8 dark:bg-white/[0.06]"
-            />
-          </div>
-
-          <div className="h-6 w-px bg-black/8 dark:bg-white/10" />
-
-          <div className="inline-flex items-center gap-2 rounded-[14px] border border-black/6 bg-white/78 px-2 py-1 dark:border-white/8 dark:bg-white/[0.04]">
-            <span className="shrink-0 text-[10px] font-medium uppercase tracking-[0.16em] text-muted-foreground">
-              Thread
-            </span>
-            {isRenamingThread && currentThread ? (
-              <>
-                <input
-                  value={renameTitle}
-                  onChange={(event) => setRenameTitle(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      void handleThreadRename();
-                    }
-                    if (event.key === "Escape") {
-                      setRenameTitle(currentThread.title);
-                      setIsRenamingThread(false);
-                    }
-                  }}
-                  className="min-w-[144px] max-w-[208px] rounded-[10px] border border-black/8 bg-white/82 px-3 py-1.5 text-[13px] font-medium outline-none transition-colors hover:border-black/12 focus:border-foreground/20 dark:border-white/8 dark:bg-white/[0.06]"
-                  placeholder="任务线名称"
-                  autoFocus
-                />
-                <button
-                  onClick={() => {
-                    void handleThreadRename();
-                  }}
-                  className="flex h-7 w-7 items-center justify-center rounded-full bg-foreground text-background transition-colors hover:opacity-90"
-                  title="保存任务线名称"
-                >
-                  <Check size={13} />
-                </button>
-                <button
-                  onClick={() => {
-                    setRenameTitle(currentThread.title);
-                    setIsRenamingThread(false);
-                  }}
-                  className="flex h-7 w-7 items-center justify-center rounded-full border border-border/60 bg-background/75 text-muted-foreground transition-colors hover:border-foreground/20 hover:text-foreground"
-                  title="取消重命名"
-                >
-                  <X size={13} />
-                </button>
-              </>
-            ) : (
-              <>
-                <select
-                  value={selectedThreadId}
-                  onChange={(event) => {
-                    void handleThreadChange(event.target.value);
-                  }}
-                  disabled={!threads.length}
-                  className="min-w-[144px] max-w-[208px] appearance-none rounded-[10px] border border-black/8 bg-white/82 px-3 py-1.5 text-[13px] font-medium outline-none transition-colors hover:border-black/12 focus:border-foreground/20 disabled:opacity-50 dark:border-white/8 dark:bg-white/[0.06]"
-                >
-                  {threads.length === 0 ? (
-                    <option value="">未绑定任务线</option>
-                  ) : (
-                    threads.map((thread) => (
-                      <option key={thread.id} value={thread.id}>
-                        {thread.title}
-                      </option>
-                    ))
-                  )}
-                </select>
-                <button
-                  onClick={() => {
-                    if (!currentThread) return;
-                    setRenameTitle(currentThread.title);
-                    setIsRenamingThread(true);
-                  }}
-                  disabled={!currentThread}
-                  className="flex h-7 w-7 items-center justify-center rounded-full border border-border/60 bg-background/75 text-muted-foreground transition-colors hover:border-foreground/20 hover:text-foreground disabled:opacity-40"
-                  title="重命名任务线"
-                >
-                  <Pencil size={13} />
-                </button>
-              </>
-            )}
-          </div>
-
-          {bundleLoading && (
-            <>
-              <div className="h-6 w-px bg-black/8 dark:bg-white/10" />
-              <div className="inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-[11px] text-muted-foreground">
-                <Loader2 size={12} className="animate-spin" />
-                <span>同步中</span>
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-
       <div className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col">
         <div className="flex-1 min-h-0 space-y-3 overflow-y-auto pb-3">
           {messages.length === 0 && (
@@ -771,10 +647,10 @@ export default function ChatPage() {
             </div>
           ))}
 
-          {sending && (
+          {sending && sendingLabel && (
             <div className="flex items-center gap-2 px-1 text-muted-foreground">
               <Loader2 className="animate-spin" size={14} />
-              <span className="text-[12px]">{sendingLabel || "发送中..."}</span>
+              <span className="text-[12px]">{sendingLabel}</span>
             </div>
           )}
           <div ref={messagesEndRef} />
@@ -783,60 +659,52 @@ export default function ChatPage() {
         <div className="shrink-0 pb-1">
           <div className="glass rounded-2xl px-4 py-3">
             <div className="mb-2 flex items-center justify-between gap-3">
-              <div className="inline-flex items-center gap-1 rounded-full border border-border/60 bg-background/70 p-1 text-[11px] text-muted-foreground">
-                <button
-                  onClick={() => setComposerMode("edit")}
-                  className={cn(
-                    "rounded-full px-2.5 py-1 transition-colors",
-                    composerMode === "edit" ? "bg-foreground text-background" : "hover:text-foreground",
-                  )}
-                >
-                  编辑
-                </button>
-                <button
-                  onClick={() => setComposerMode("preview")}
-                  className={cn(
-                    "rounded-full px-2.5 py-1 transition-colors",
-                    composerMode === "preview" ? "bg-foreground text-background" : "hover:text-foreground",
-                  )}
-                >
-                  预览
-                </button>
-              </div>
               <span className="text-[11px] text-muted-foreground">
-                {composerMode === "preview" ? "发送前按 Markdown 预览" : "Enter 发送，Shift+Enter 换行"}
+                {agentSwitchCommand
+                  ? "输入 /agent dolphin 这样的命令可以切换 Agent"
+                  : showComposerPreview
+                    ? "检测到 Markdown，下面会实时预览"
+                    : "Enter 换行，Cmd/Ctrl+Enter 发送"}
               </span>
+              {bundleLoading && (
+                <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                  <Loader2 size={12} className="animate-spin" />
+                  <span>同步中</span>
+                </span>
+              )}
             </div>
 
             <div className="flex items-end gap-2">
-              {composerMode === "edit" ? (
+              <div className="flex-1">
                 <textarea
                   ref={inputRef}
                   value={input}
                   onChange={(event) => setInput(event.target.value)}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
+                    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
                       event.preventDefault();
                       void send();
                     }
                   }}
-                  placeholder={agent ? `发送给 ${agent.name}，并挂到当前 Thread...` : "选择 Agent..."}
+                  placeholder={agent ? "输入消息..." : "选择 Agent..."}
                   disabled={!selectedAgentId || sending}
                   rows={1}
-                  className="max-h-[160px] flex-1 resize-none bg-transparent text-[13px] outline-none placeholder:text-muted-foreground disabled:opacity-40"
+                  className="max-h-[160px] w-full resize-none bg-transparent text-[13px] outline-none placeholder:text-muted-foreground disabled:opacity-40"
                   style={{ minHeight: "72px" }}
                 />
-              ) : (
-                <div className="min-h-[72px] max-h-[160px] flex-1 overflow-y-auto rounded-2xl border border-border/50 bg-background/35 px-3 py-2">
-                  {input.trim() ? (
-                    <div className={MESSAGE_MARKDOWN_CLASS}>
-                      <Markdown remarkPlugins={[remarkGfm]}>{input}</Markdown>
-                    </div>
-                  ) : (
-                    <div className="pt-1 text-[13px] text-muted-foreground">输入内容后，这里会显示 Markdown 预览。</div>
-                  )}
-                </div>
-              )}
+
+                {showComposerPreview && (
+                  <div className="mt-3 rounded-2xl border border-border/50 bg-background/35 px-3 py-2">
+                    {input.trim() ? (
+                      <div className={MESSAGE_MARKDOWN_CLASS}>
+                        <Markdown remarkPlugins={[remarkGfm]}>{input}</Markdown>
+                      </div>
+                    ) : (
+                      <div className="pt-1 text-[13px] text-muted-foreground">输入内容后，这里会显示 Markdown 预览。</div>
+                    )}
+                  </div>
+                )}
+              </div>
               <button
                 onClick={() => {
                   void send();

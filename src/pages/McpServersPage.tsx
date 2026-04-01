@@ -358,6 +358,23 @@ export default function McpServersPage() {
 
   useEffect(() => { loadHub(); }, [loadHub]);
 
+  const syncDolphinMcp = async () => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      await invoke("sync_custom_agent_resources", {
+        id: "dolphin",
+        includeModels: false,
+        includeMcpServers: true,
+        includeSkills: false,
+      });
+      const { useAgentsStore } = await import("@/stores/agents-store");
+      await useAgentsStore.getState().refresh();
+      toast.success("已把启用中的 MCP Servers 同步到 dolphin");
+    } catch (error) {
+      toast.error(`同步到 dolphin 失败: ${error}`);
+    }
+  };
+
   if (loading) return <div className="flex items-center justify-center h-full text-muted-foreground">Loading...</div>;
 
   return (
@@ -374,6 +391,14 @@ export default function McpServersPage() {
           </div>
         </div>
         <div className="flex items-center gap-3">
+          <button
+            onClick={() => {
+              void syncDolphinMcp();
+            }}
+            className="inline-flex items-center gap-1.5 rounded-full border border-border/70 px-3 py-1.5 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+          >
+            同步到 dolphin
+          </button>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             {saving && <span className="flex items-center gap-1"><Loader2 size={12} className="animate-spin" /> Saving...</span>}
             {!saving && dirty && <span className="flex items-center gap-1 text-yellow-400"><AlertCircle size={12} /> Unsaved</span>}

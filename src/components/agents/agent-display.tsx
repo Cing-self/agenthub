@@ -105,7 +105,7 @@ export function getAgentSummary(agent: DetectedAgent) {
     case "opencode":
       return `${agent.details.has_agents ? "custom agents" : "base agents"} · ${agent.details.has_skills ? "skills on" : "skills off"}`;
     case "custom-agent":
-      return `${getAgentRuntimeLabel(agent)} · ${agent.details.auth_source || "runtime auth"}${agent.details.default_model ? ` · ${agent.details.default_model}` : ""}`;
+      return `${getAgentRuntimeLabel(agent)} · ${agent.details.model_count} models · ${agent.details.mcp_server_count} MCP`;
     default:
       return "ready for routing";
   }

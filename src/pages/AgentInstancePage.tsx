@@ -24,6 +24,8 @@ import ClaudeCodeHooksTab from "./instance-tabs/claudecode/HooksTab";
 import ClaudeCodeSkillsTab from "./instance-tabs/claudecode/SkillsTab";
 import ClaudeCodePluginsTab from "./instance-tabs/claudecode/PluginsTab";
 import CodexConfigTab from "./instance-tabs/codex/ConfigTab";
+import CustomAgentRuntimeTab from "./instance-tabs/custom-agent/RuntimeTab";
+import type { CustomAgentConfig } from "@/lib/types/custom-agents";
 
 interface TabDef {
   label: string;
@@ -58,6 +60,11 @@ const CODEX_TABS: TabDef[] = [
   { label: "配置", path: "config", icon: <Wrench size={14} /> },
 ];
 
+const CUSTOM_AGENT_TABS: TabDef[] = [
+  { label: "Overview", path: "", icon: <Settings size={14} /> },
+  { label: "Runtime & Auth", path: "runtime", icon: <Bot size={14} /> },
+];
+
 export default function AgentInstancePage() {
   const { agentId } = useParams();
   const { agents } = useAgentsStore();
@@ -74,10 +81,8 @@ export default function AgentInstancePage() {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       if (agent.config_path.startsWith("agenthub://")) {
-        setConfig({
-          runtimeProfile: agent.runtime_profile ?? null,
-          runtimeFamily: agent.runtime_family ?? agent.agent_type,
-        });
+        const customAgent = await invoke<Record<string, unknown>>("get_custom_agent", { id: agent.id });
+        setConfig(customAgent);
         return;
       }
       const data = await invoke<Record<string, unknown>>("read_config", {
@@ -99,6 +104,18 @@ export default function AgentInstancePage() {
     if (!agent) return;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
+      if (agent.agent_type === "custom-agent") {
+        const nextConfig = {
+          ...(config as Record<string, unknown>),
+          [module]: data,
+        };
+        await invoke("upsert_custom_agent", { agent: nextConfig });
+        toast.success(`Saved ${module}`);
+        await loadConfig();
+        const { useAgentsStore } = await import("@/stores/agents-store");
+        await useAgentsStore.getState().refresh();
+        return;
+      }
       await invoke("write_config_module", { module, data });
       toast.success(`Saved ${module}`);
       // Reload to stay in sync
@@ -107,13 +124,21 @@ export default function AgentInstancePage() {
       console.error("Failed to save config:", err);
       toast.error(`Failed to save: ${err}`);
     }
-  }, [agent, loadConfig]);
+  }, [agent, config, loadConfig]);
 
   // Save the entire config (for Raw tab full JSON editing, and Claude Code tabs)
   const saveFullConfig = useCallback(async (newConfig: Record<string, unknown>) => {
     if (!agent) return;
     try {
       const { invoke } = await import("@tauri-apps/api/core");
+      if (agent.agent_type === "custom-agent") {
+        await invoke("upsert_custom_agent", { agent: newConfig });
+        toast.success("Config saved");
+        await loadConfig();
+        const { useAgentsStore } = await import("@/stores/agents-store");
+        await useAgentsStore.getState().refresh();
+        return;
+      }
       if (runtimeFamily === "claude-code" || runtimeFamily === "codex") {
         // Claude Code / Codex: write the entire file directly
         const jsonStr = JSON.stringify(newConfig, null, 2);
@@ -130,7 +155,7 @@ export default function AgentInstancePage() {
       console.error("Failed to save config:", err);
       toast.error(`Failed to save: ${err}`);
     }
-  }, [agent, loadConfig]);
+  }, [agent, loadConfig, runtimeFamily]);
 
   if (!agent) {
     return (
@@ -142,7 +167,7 @@ export default function AgentInstancePage() {
 
   const tabs =
     agent.agent_type === "custom-agent"
-      ? [{ label: "Overview", path: "", icon: <Settings size={14} /> }]
+      ? CUSTOM_AGENT_TABS
       : runtimeFamily === "openclaw"
       ? OPENCLAW_TABS
       : runtimeFamily === "claude-code"
@@ -258,6 +283,35 @@ export default function AgentInstancePage() {
       ) : (
         <Routes>
           <Route index element={<OverviewTab agent={agent} config={config} />} />
+          {agent.agent_type === "custom-agent" && (
+            <>
+              <Route
+                path="runtime"
+                element={
+                  <CustomAgentRuntimeTab
+                    agent={agent}
+                    config={config as CustomAgentConfig | null}
+                    onSave={async (nextConfig) => {
+                      await saveFullConfig(nextConfig as unknown as Record<string, unknown>);
+                    }}
+                    onSync={async (options) => {
+                      const { invoke } = await import("@tauri-apps/api/core");
+                      const updated = await invoke<CustomAgentConfig>("sync_custom_agent_resources", {
+                        id: agent.id,
+                        includeModels: options.includeModels,
+                        includeMcpServers: options.includeMcpServers,
+                        includeSkills: options.includeSkills,
+                      });
+                      setConfig(updated as unknown as Record<string, unknown>);
+                      const { useAgentsStore } = await import("@/stores/agents-store");
+                      await useAgentsStore.getState().refresh();
+                      return updated;
+                    }}
+                  />
+                }
+              />
+            </>
+          )}
           {runtimeFamily === "claude-code" && agent.agent_type !== "custom-agent" && (
             <>
               <Route path="model" element={<ClaudeCodeModelTab agent={agent} config={config} onSave={saveFullConfig} />} />

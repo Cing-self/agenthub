@@ -1,7 +1,10 @@
 pub mod backup;
+pub mod channels;
 pub mod cli;
 pub mod collaboration;
 pub mod config;
+pub mod cron;
+pub mod custom_agents;
 pub mod health;
 pub mod memory;
 pub mod monitor;

@@ -4,6 +4,7 @@ import { EditableRow } from "@/components/shared/EditableRow";
 import { SelectRow } from "@/components/shared/SelectRow";
 import { SettingsGroup } from "@/components/shared/SettingsGroup";
 import { toast } from "sonner";
+import type { SharedChannelAccount, SharedChannelConfig } from "@/lib/types/custom-agents";
 
 interface Props {
   config: Record<string, unknown> | null;
@@ -15,6 +16,7 @@ const CHANNEL_TYPES = [
   { value: "telegram", label: "Telegram" },
   { value: "slack", label: "Slack" },
   { value: "feishu", label: "飞书" },
+  { value: "qq", label: "QQ" },
   { value: "whatsapp", label: "WhatsApp" },
   { value: "weixin", label: "微信" },
 ];
@@ -32,54 +34,100 @@ const STREAMING_OPTIONS = [
   { value: "full", label: "完整" },
 ];
 
+const TRANSPORT_OPTIONS = [
+  { value: "bot", label: "Bot" },
+  { value: "webhook", label: "Webhook" },
+  { value: "gateway", label: "Gateway" },
+  { value: "custom", label: "Custom" },
+];
+
 export default function ChannelsTab({ config, onSave }: Props) {
-  const channels = (config?.channels || {}) as Record<string, unknown>;
+  const channels = (config?.channels || {}) as Record<string, SharedChannelConfig>;
   const [expandedChannel, setExpandedChannel] = useState<string | null>(null);
   const [addingChannel, setAddingChannel] = useState(false);
   const [newChannelType, setNewChannelType] = useState("");
+  const [addingAccountFor, setAddingAccountFor] = useState<string | null>(null);
+  const [newAccountName, setNewAccountName] = useState("");
 
   const channelNames = Object.keys(channels);
 
-  const saveChannels = (updated: Record<string, unknown>) => {
+  const saveChannels = (updated: Record<string, SharedChannelConfig>) => {
     onSave?.("channels", updated);
   };
 
-  const updateChannel = (name: string, key: string, value: unknown) => {
-    const ch = JSON.parse(JSON.stringify(channels));
-    if (!ch[name]) ch[name] = {};
-    if (value === "" || value === undefined) delete (ch[name] as Record<string, unknown>)[key];
-    else (ch[name] as Record<string, unknown>)[key] = value;
-    saveChannels(ch);
+  const cloneChannels = () => structuredClone(channels) as Record<string, SharedChannelConfig>;
+
+  const updateChannel = (name: string, key: keyof SharedChannelConfig, value: unknown) => {
+    const next = cloneChannels();
+    if (!next[name]) next[name] = {};
+    if (value === "" || value === undefined) delete next[name][key];
+    else (next[name] as Record<string, unknown>)[key] = value;
+    saveChannels(next);
+  };
+
+  const updateAccount = (
+    channelName: string,
+    accountName: string,
+    key: keyof SharedChannelAccount,
+    value: unknown,
+  ) => {
+    const next = cloneChannels();
+    if (!next[channelName]) next[channelName] = {};
+    if (!next[channelName].accounts) next[channelName].accounts = {};
+    if (!next[channelName].accounts?.[accountName]) {
+      next[channelName].accounts![accountName] = {};
+    }
+    const account = next[channelName].accounts![accountName];
+    if (value === "" || value === undefined) delete account[key];
+    else (account as Record<string, unknown>)[key] = value;
+    saveChannels(next);
   };
 
   const removeChannel = (name: string) => {
-    const ch = JSON.parse(JSON.stringify(channels));
-    delete ch[name];
-    saveChannels(ch);
+    const next = cloneChannels();
+    delete next[name];
+    saveChannels(next);
     toast.success(`已删除 ${name}`);
   };
 
   const addChannel = () => {
     if (!newChannelType) return;
-    const ch = JSON.parse(JSON.stringify(channels));
-    if (!ch[newChannelType]) ch[newChannelType] = { enabled: true };
-    saveChannels(ch);
+    const next = cloneChannels();
+    if (!next[newChannelType]) next[newChannelType] = { enabled: true, transport: "bot" };
+    saveChannels(next);
     setExpandedChannel(newChannelType);
     setAddingChannel(false);
     setNewChannelType("");
     toast.success(`已添加 ${newChannelType}`);
   };
 
+  const addAccount = (channelName: string) => {
+    const accountName = newAccountName.trim();
+    if (!accountName) return;
+    const next = cloneChannels();
+    if (!next[channelName]) next[channelName] = {};
+    if (!next[channelName].accounts) next[channelName].accounts = {};
+    if (!next[channelName].accounts?.[accountName]) {
+      next[channelName].accounts![accountName] = {
+        enabled: true,
+      };
+      saveChannels(next);
+      toast.success(`已添加账号 ${accountName}`);
+    }
+    setAddingAccountFor(null);
+    setNewAccountName("");
+  };
+
   return (
     <div className="space-y-6 max-w-xl pb-8">
-      <SettingsGroup title={`频道 (${channelNames.length})`}>
+      <SettingsGroup title={`Channels (${channelNames.length})`} description="飞书、QQ、Discord 这类接入统一走共享频道模型。当前先把账号、Webhook、Bot 入口收成一套。">
         {channelNames.length === 0 && !addingChannel && (
           <div className="py-6 text-center text-[13px] text-muted-foreground">没有配置频道</div>
         )}
         {channelNames.map(name => {
-          const ch = (channels[name] || {}) as Record<string, unknown>;
+          const ch = channels[name] || {};
           const isOpen = expandedChannel === name;
-          const accounts = (ch.accounts || {}) as Record<string, unknown>;
+          const accounts = ch.accounts || {};
           const accountNames = Object.keys(accounts);
 
           return (
@@ -99,6 +147,9 @@ export default function ChannelsTab({ config, onSave }: Props) {
                 <div className="pb-2 px-1 space-y-1">
                   <EditableRow label="启用" value={String(ch.enabled ?? "false")} type="toggle"
                     onSave={onSave ? (v) => updateChannel(name, "enabled", v === "true") : undefined} />
+                  <SelectRow label="传输方式" value={String(ch.transport || "")} options={TRANSPORT_OPTIONS}
+                    onSave={onSave ? (v) => updateChannel(name, "transport", v) : undefined}
+                    placeholder="选择 transport" />
                   <SelectRow label="群组策略" value={String(ch.groupPolicy || "")} options={GROUP_POLICY_OPTIONS}
                     onSave={onSave ? (v) => updateChannel(name, "groupPolicy", v) : undefined} />
                   <SelectRow label="流式输出" value={String(ch.streaming || "")} options={STREAMING_OPTIONS}
@@ -108,33 +159,90 @@ export default function ChannelsTab({ config, onSave }: Props) {
                     <div className="mt-2">
                       <div className="text-[11px] text-muted-foreground mb-1 px-1">账号</div>
                       {accountNames.map(accName => {
-                        const acc = (accounts[accName] || {}) as Record<string, unknown>;
+                        const acc = accounts[accName] || {};
                         return (
                           <div key={accName} className="glass-subtle rounded-xl p-3 mb-2 space-y-1">
                             <div className="flex items-center justify-between">
                               <span className="text-[12px] font-medium">{accName}</span>
                               {onSave && (
                                 <button onClick={() => {
-                                  const ch2 = JSON.parse(JSON.stringify(channels));
-                                  delete (ch2[name] as Record<string, unknown>).accounts;
-                                  const accs = JSON.parse(JSON.stringify(accounts));
-                                  delete accs[accName];
-                                  if (Object.keys(accs).length > 0) (ch2[name] as Record<string, unknown>).accounts = accs;
-                                  saveChannels(ch2);
+                                  const next = cloneChannels();
+                                  delete next[name].accounts?.[accName];
+                                  if (next[name].accounts && Object.keys(next[name].accounts!).length === 0) {
+                                    delete next[name].accounts;
+                                  }
+                                  saveChannels(next);
                                   toast.success(`已删除账号 ${accName}`);
                                 }} className="text-[11px] text-muted-foreground hover:text-foreground">删除</button>
                               )}
                             </div>
-                            <EditableRow label="Token" value={acc.token ? "••••••" : ""} mono
-                              onSave={onSave ? (v) => {
-                                const ch2 = JSON.parse(JSON.stringify(channels));
-                                (ch2[name] as Record<string, unknown>).accounts = { ...accounts, [accName]: { ...acc, token: v } };
-                                saveChannels(ch2);
-                              } : undefined} placeholder="设置" />
+                            <EditableRow label="启用" value={String(acc.enabled ?? "false")} type="toggle"
+                              onSave={onSave ? (v) => updateAccount(name, accName, "enabled", v === "true") : undefined} />
+                            <EditableRow label="Identifier" value={acc.identifier || ""}
+                              onSave={onSave ? (v) => updateAccount(name, accName, "identifier", v) : undefined}
+                              placeholder="群组 ID / 用户 ID / Channel ID" />
+                            <EditableRow label="App ID" value={acc.appId || ""}
+                              onSave={onSave ? (v) => updateAccount(name, accName, "appId", v) : undefined}
+                              placeholder="飞书 / Discord App ID" />
+                            <EditableRow label="Bot ID" value={acc.botId || ""}
+                              onSave={onSave ? (v) => updateAccount(name, accName, "botId", v) : undefined}
+                              placeholder="Bot 标识" />
+                            <EditableRow label="Webhook" value={acc.webhookUrl || ""} mono
+                              onSave={onSave ? (v) => updateAccount(name, accName, "webhookUrl", v) : undefined}
+                              placeholder="https://..." />
+                            <EditableRow label="Token" value={acc.token || ""} mono
+                              onSave={onSave ? (v) => updateAccount(name, accName, "token", v) : undefined}
+                              placeholder="设置 token" />
+                            <EditableRow label="Secret" value={acc.secret || ""} mono
+                              onSave={onSave ? (v) => updateAccount(name, accName, "secret", v) : undefined}
+                              placeholder="设置 secret" />
                           </div>
                         );
                       })}
                     </div>
+                  )}
+
+                  {onSave && (
+                    addingAccountFor === name ? (
+                      <div className="mt-2 flex items-center gap-2 rounded-xl border border-border/60 px-3 py-2">
+                        <input
+                          value={newAccountName}
+                          onChange={(event) => setNewAccountName(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              addAccount(name);
+                            }
+                          }}
+                          placeholder="账号名称，例如 main / ops / feishu-bot"
+                          className="flex-1 bg-transparent text-[12px] outline-none placeholder:text-muted-foreground/45"
+                        />
+                        <button
+                          onClick={() => addAccount(name)}
+                          className="text-[12px] text-foreground/70 hover:text-foreground"
+                        >
+                          添加
+                        </button>
+                        <button
+                          onClick={() => {
+                            setAddingAccountFor(null);
+                            setNewAccountName("");
+                          }}
+                          className="text-[12px] text-muted-foreground"
+                        >
+                          取消
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        onClick={() => {
+                          setAddingAccountFor(name);
+                          setNewAccountName("");
+                        }}
+                        className="mt-2 text-[12px] text-muted-foreground hover:text-foreground transition-colors"
+                      >
+                        + 添加账号
+                      </button>
+                    )
                   )}
 
                   {onSave && (

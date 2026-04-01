@@ -52,6 +52,9 @@ export default function OverviewTab({ agent, config }: Props) {
       <Card key="auth" title="Auth" value={agent.details.auth_source || "runtime default"} />,
       <Card key="model" title="Default Model" value={agent.details.default_model || "runtime default"} />,
       <Card key="based-on" title="Based On" value={agent.details.based_on_runtime} />,
+      <Card key="models" title="Models" value={`${agent.details.model_count} selected`} />,
+      <Card key="mcp" title="MCP" value={`${agent.details.mcp_server_count} selected`} />,
+      <Card key="skills" title="Skills" value={`${agent.details.skill_directory_count} dir(s)`} />,
     );
   } else {
     cards.push(

@@ -11,6 +11,12 @@ pub struct CliResult {
     pub json: Option<serde_json::Value>,
 }
 
+fn escape_for_applescript(command: &str) -> String {
+    command
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+}
+
 #[derive(Deserialize)]
 struct CustomRuntimeProfileConfig {
     runtime_family: String,
@@ -109,6 +115,42 @@ pub async fn run_shell_cmd(command: String, timeout_secs: Option<u64>) -> Result
         success: output.status.success(),
         json: serde_json::from_str(&stdout).ok(),
     })
+}
+
+#[tauri::command]
+pub async fn open_terminal_command(command: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(target_os = "macos")]
+        {
+            let escaped = escape_for_applescript(&command);
+            Command::new("osascript")
+                .arg("-e")
+                .arg(format!("tell application \"Terminal\" to do script \"{}\"", escaped))
+                .arg("-e")
+                .arg("tell application \"Terminal\" to activate")
+                .status()
+                .map_err(|error| format!("Failed to open Terminal: {}", error))?;
+            return Ok(());
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            Command::new("sh")
+                .arg("-c")
+                .arg(format!("x-terminal-emulator -e '{}'; true", command))
+                .status()
+                .map_err(|error| format!("Failed to open terminal: {}", error))?;
+            return Ok(());
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            let _ = command;
+            return Err("Opening an interactive terminal is not supported on this platform".to_string());
+        }
+    })
+    .await
+    .map_err(|error| format!("Failed to run terminal launcher: {}", error))?
 }
 
 #[tauri::command]

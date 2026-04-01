@@ -17,6 +17,10 @@
         "height": 800,
         "minWidth": 900,
         "minHeight": 600,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "backgroundColor": "#f6f3ee",
         "resizable": true,
         "fullscreen": false
       }

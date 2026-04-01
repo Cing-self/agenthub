@@ -16,6 +16,8 @@ export function AgentSwitchRail({
   const orderedAgents = [...agents].sort((left, right) => {
     if (left.id === selectedAgentId) return -1;
     if (right.id === selectedAgentId) return 1;
+    if (left.id === "dolphin") return -1;
+    if (right.id === "dolphin") return 1;
     if (left.running !== right.running) return left.running ? -1 : 1;
     return left.name.localeCompare(right.name);
   });

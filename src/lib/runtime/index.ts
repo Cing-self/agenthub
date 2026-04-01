@@ -32,6 +32,23 @@ function buildOpenClawSessionKey(threadId: string, agentId: string) {
   return `agenthub-${agentId}-${threadId}`;
 }
 
+function compactRuntimeError(...chunks: Array<string | null | undefined>) {
+  const merged = chunks
+    .filter((chunk): chunk is string => typeof chunk === "string" && chunk.trim().length > 0)
+    .flatMap((chunk) => chunk.split("\n"))
+    .map((line) => line.trim())
+    .filter(
+      (line) =>
+        line.length > 0 &&
+        !line.startsWith("[plugins]") &&
+        !line.startsWith("Config warnings:") &&
+        !line.startsWith("- plugins."),
+    );
+
+  if (!merged.length) return null;
+  return merged.slice(0, 6).join("\n");
+}
+
 async function invokeCore<T>(command: string, args: Record<string, unknown>) {
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<T>(command, args);
@@ -45,7 +62,7 @@ async function runShellPrompt(command: string) {
 }
 
 function parseOpenClawResponse(
-  result: { stdout: string; success: boolean; json?: unknown },
+  result: { stdout: string; stderr?: string; success: boolean; json?: unknown },
   fallbackRuntimeSessionId: string | null,
 ): RuntimeSendResult {
   let runtimeSessionId = fallbackRuntimeSessionId;
@@ -89,6 +106,17 @@ function parseOpenClawResponse(
     }
   }
 
+  if (!result.success) {
+    const runtimeError = compactRuntimeError(result.stderr, result.stdout);
+    if (runtimeError) {
+      return {
+        rawText: runtimeError,
+        parsedBlocks: [],
+        runtimeSessionId,
+      };
+    }
+  }
+
   return {
     rawText: result.success ? "（无回复）" : "（Gateway 未响应）",
     parsedBlocks: [],
@@ -118,7 +146,7 @@ const openClawRuntime: RuntimeAdapter = {
       params.sessionKey = buildOpenClawSessionKey(threadId, agentId);
     }
 
-    const result = await invokeCore<{ stdout: string; success: boolean; json?: unknown }>(
+    const result = await invokeCore<{ stdout: string; stderr?: string; success: boolean; json?: unknown }>(
       "run_openclaw_cmd",
       {
         args: [
