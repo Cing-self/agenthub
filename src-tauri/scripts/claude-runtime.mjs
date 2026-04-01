@@ -307,6 +307,7 @@ function buildUiPrompt(payload) {
     "You are answering inside AgentHub chat.",
     "You may answer entirely in normal Markdown. Decide for yourself whether a visual widget would materially improve comprehension, scannability, or usefulness.",
     "Only emit a widget when the answer truly benefits from a visual or interactive artifact. Do not force widgets for simple questions.",
+    "Widgets are often helpful for compact overviews, key metrics, comparisons, trends, timelines, architecture sketches, checklists, dashboards, repository snapshots, task status, or memory summaries.",
     "When you choose to render a widget, emit one or more Markdown fenced blocks using exactly the marker ```show-widget.",
     "Each fence body must be valid JSON.",
     "Preferred widget protocol:",
