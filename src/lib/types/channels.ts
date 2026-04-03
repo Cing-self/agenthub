@@ -1,4 +1,5 @@
 export type ChannelPlatform = "feishu";
+export type GatewayKind = "feishu";
 export type ChannelTransport = "websocket" | "webhook";
 export type ChannelDmPolicy = "allow" | "deny";
 export type ChannelGroupPolicy =
@@ -20,6 +21,7 @@ export interface ChannelPolicyConfig {
   dmPolicy?: ChannelDmPolicy | null;
   groupPolicy?: ChannelGroupPolicy | null;
   requireMention?: boolean | null;
+  streaming?: boolean | null;
   allowedChatIds?: string[];
   allowedUserIds?: string[];
 }
@@ -36,6 +38,9 @@ export interface FeishuAccountConfig {
   lastError?: string | null;
   lastTestedAt?: string | null;
   tokenExpiresIn?: number | null;
+  cardkitAvailable?: boolean | null;
+  cardkitCheckedAt?: string | null;
+  cardkitMessage?: string | null;
 }
 
 export interface FeishuChannelConfig {
@@ -58,4 +63,36 @@ export interface FeishuConnectionResult {
   expiresIn: number | null;
   tokenPreview: string | null;
   message: string;
+  cardkitAvailable: boolean;
+  cardkitMessage: string | null;
 }
+
+export interface GatewayWorkerStatus {
+  running: boolean;
+  pid?: number | null;
+  status: "stopped" | "starting" | "running" | "error" | string;
+  startedAt?: string | null;
+  updatedAt?: string | null;
+  lastMessageAt?: string | null;
+  lastReplyAt?: string | null;
+  lastError?: string | null;
+  accountId?: string | null;
+  agentId?: string | null;
+  transport?: string | null;
+  runtimeBackend?: string | null;
+  runtimeBackendDetail?: string | null;
+  botOpenId?: string | null;
+  gatewayId?: string | null;
+  gatewayKind?: GatewayKind | string | null;
+  conversationStorePath?: string | null;
+  logPath: string;
+}
+
+export interface GatewayWorkerLogTail {
+  logPath: string;
+  lines: string[];
+  truncated: boolean;
+  updatedAt: string;
+}
+
+export type FeishuDaemonStatus = GatewayWorkerStatus;

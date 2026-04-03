@@ -28,6 +28,8 @@ export function WindowChrome() {
   const location = useLocation();
   const { currentBundle } = useCollaborationStore();
   const { sidebarCollapsed, toggleSidebarCollapsed } = useModeStore();
+  const contentChromeColor = "var(--window-bg)";
+  const sidebarChromeColor = "var(--sidebar-bg)";
 
   const sectionLabel = useMemo(() => resolveSectionLabel(location.pathname), [location.pathname]);
   const title = useMemo(() => {
@@ -61,14 +63,14 @@ export function WindowChrome() {
           <div
             aria-hidden
             className="absolute inset-0 transition-opacity duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
-            style={{ backgroundColor: "var(--window-sidebar)" }}
+            style={{ backgroundColor: sidebarChromeColor }}
           />
           <div
             aria-hidden
             className="absolute inset-0 transition-opacity duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
             style={{
               opacity: sidebarCollapsed ? 1 : 0,
-              backgroundColor: "var(--window-chrome)",
+              backgroundColor: contentChromeColor,
             }}
           />
 
@@ -91,7 +93,7 @@ export function WindowChrome() {
         <div
           data-tauri-drag-region
           className="flex h-full items-center justify-center px-4 backdrop-blur-xl"
-          style={{ backgroundColor: "var(--window-chrome)" }}
+          style={{ backgroundColor: contentChromeColor }}
         >
           <div className="pointer-events-none text-[13px] font-medium tracking-[0.01em] text-foreground/80">{title}</div>
         </div>

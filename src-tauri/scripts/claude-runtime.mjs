@@ -19,7 +19,11 @@ function sanitizeOpenMemKey(value) {
 }
 
 function openMemUserId() {
-  const user = process.env.USER || process.env.USERNAME || os.userInfo().username || "default";
+  const user =
+    process.env.USER ||
+    process.env.USERNAME ||
+    os.userInfo().username ||
+    "default";
   return `agenthub-user-${sanitizeOpenMemKey(user.toLowerCase())}`;
 }
 
@@ -59,7 +63,9 @@ async function readHubConfig() {
 }
 
 function normalizeBaseUrl(value) {
-  return String(value || "").trim().replace(/\/+$/, "");
+  return String(value || "")
+    .trim()
+    .replace(/\/+$/, "");
 }
 
 function looksLikeOpenMem(baseUrl) {
@@ -73,8 +79,9 @@ function looksLikeOpenMem(baseUrl) {
 
 function normalizeMemoryProvider(config) {
   const baseUrl = normalizeBaseUrl(config?.base_url);
-  const provider =
-    looksLikeOpenMem(baseUrl) ? "openmem" : String(config?.provider || "memos").trim() || "memos";
+  const provider = looksLikeOpenMem(baseUrl)
+    ? "openmem"
+    : String(config?.provider || "memos").trim() || "memos";
 
   return {
     provider,
@@ -105,7 +112,9 @@ function parseAgentHubMemo(content) {
   const end = trimmed.indexOf("-->");
   if (end === -1) return null;
   try {
-    const meta = JSON.parse(trimmed.slice(AGENTHUB_MEMO_PREFIX.length, end).trim());
+    const meta = JSON.parse(
+      trimmed.slice(AGENTHUB_MEMO_PREFIX.length, end).trim(),
+    );
     const body = trimmed.slice(end + 3).trim();
     return { meta, body };
   } catch {
@@ -117,7 +126,11 @@ async function fetchJson(url, options = {}) {
   const response = await fetch(url, options);
   if (!response.ok) {
     const body = await response.text().catch(() => "");
-    throw new Error(body ? `${response.status} ${body}` : `${response.status} ${response.statusText}`);
+    throw new Error(
+      body
+        ? `${response.status} ${body}`
+        : `${response.status} ${response.statusText}`,
+    );
   }
   return response.json();
 }
@@ -148,7 +161,9 @@ function parseGitHubRepoRef(input) {
 async function githubRepoOverview(repoInput) {
   const parsed = parseGitHubRepoRef(repoInput);
   if (!parsed) {
-    throw new Error("无法识别 GitHub 仓库地址，请提供完整 GitHub URL 或 owner/repo。");
+    throw new Error(
+      "无法识别 GitHub 仓库地址，请提供完整 GitHub URL 或 owner/repo。",
+    );
   }
 
   const { owner, repo } = parsed;
@@ -159,12 +174,19 @@ async function githubRepoOverview(repoInput) {
 
   const [repoData, languages, contents] = await Promise.all([
     fetchJson(`https://api.github.com/repos/${owner}/${repo}`, { headers }),
-    fetchJson(`https://api.github.com/repos/${owner}/${repo}/languages`, { headers }).catch(() => ({})),
-    fetchJson(`https://api.github.com/repos/${owner}/${repo}/contents`, { headers }).catch(() => []),
+    fetchJson(`https://api.github.com/repos/${owner}/${repo}/languages`, {
+      headers,
+    }).catch(() => ({})),
+    fetchJson(`https://api.github.com/repos/${owner}/${repo}/contents`, {
+      headers,
+    }).catch(() => []),
   ]);
 
   const languageEntries = Object.entries(languages || {});
-  const totalBytes = languageEntries.reduce((sum, [, bytes]) => sum + Number(bytes || 0), 0);
+  const totalBytes = languageEntries.reduce(
+    (sum, [, bytes]) => sum + Number(bytes || 0),
+    0,
+  );
 
   return {
     full_name: repoData.full_name,
@@ -190,7 +212,10 @@ async function githubRepoOverview(repoInput) {
       .map(([name, bytes]) => ({
         name,
         bytes,
-        pct: totalBytes > 0 ? Number(((Number(bytes || 0) / totalBytes) * 100).toFixed(1)) : 0,
+        pct:
+          totalBytes > 0
+            ? Number(((Number(bytes || 0) / totalBytes) * 100).toFixed(1))
+            : 0,
       })),
     top_level: Array.isArray(contents)
       ? contents.slice(0, 12).map((item) => ({
@@ -203,12 +228,22 @@ async function githubRepoOverview(repoInput) {
 
 function getThreadBundle(hub, threadId) {
   const collaboration = hub?.collaboration || {};
-  const thread = (collaboration.threads || []).find((item) => item.id === threadId);
+  const thread = (collaboration.threads || []).find(
+    (item) => item.id === threadId,
+  );
   if (!thread) return null;
-  const board = (collaboration.boards || []).find((item) => item.id === thread.board_id);
-  const tasks = (collaboration.tasks || []).filter((item) => item.thread_id === threadId);
-  const sessions = (collaboration.sessions || []).filter((item) => item.thread_id === threadId);
-  const events = (collaboration.events || []).filter((item) => item.thread_id === threadId);
+  const board = (collaboration.boards || []).find(
+    (item) => item.id === thread.board_id,
+  );
+  const tasks = (collaboration.tasks || []).filter(
+    (item) => item.thread_id === threadId,
+  );
+  const sessions = (collaboration.sessions || []).filter(
+    (item) => item.thread_id === threadId,
+  );
+  const events = (collaboration.events || []).filter(
+    (item) => item.thread_id === threadId,
+  );
   return {
     thread,
     board,
@@ -308,7 +343,9 @@ async function memorySearch(memoryConfig, queryText, threadId, limit = 5) {
     });
 
     const data = response?.data || {};
-    const detailList = Array.isArray(data.memory_detail_list) ? data.memory_detail_list : [];
+    const detailList = Array.isArray(data.memory_detail_list)
+      ? data.memory_detail_list
+      : [];
     const preferences = Array.isArray(data.preference_detail_list)
       ? data.preference_detail_list
       : [];
@@ -334,9 +371,12 @@ async function memorySearch(memoryConfig, queryText, threadId, limit = 5) {
     return items.slice(0, limit);
   }
 
-  const payload = await fetchJson(`${memoryConfig.base_url}/api/v1/memos?pageSize=200&orderBy=display_time%20desc`, {
-    headers: authHeaders(memoryConfig),
-  });
+  const payload = await fetchJson(
+    `${memoryConfig.base_url}/api/v1/memos?pageSize=200&orderBy=display_time%20desc`,
+    {
+      headers: authHeaders(memoryConfig),
+    },
+  );
   const memos = Array.isArray(payload?.memos) ? payload.memos : [];
   const lowered = queryText.trim().toLowerCase();
 
@@ -382,6 +422,26 @@ function extractAssistantText(message) {
 }
 
 function buildUiPrompt(payload) {
+  const outputSurface =
+    payload?.outputSurface === "plain-chat" ? "plain-chat" : "agenthub-chat";
+
+  if (outputSurface === "plain-chat") {
+    return [
+      "You are answering inside an external chat surface such as Feishu, Telegram, or voice transcript chat.",
+      "Reply only in normal Markdown or plain text that reads naturally in a messaging app.",
+      "Do not emit show-widget fences, HTML, CSS, JavaScript, JSON blobs, or implementation markers.",
+      "Do not mention widgets, cards, rendering, visualization, components, or any internal protocol.",
+      "Keep the answer direct and user-facing. Prefer concise paragraphs or short flat bullets when they genuinely help.",
+      "If tools do not provide enough reliable data, answer honestly in normal Markdown instead of inventing structured output.",
+      payload?.threadTitle
+        ? `Current thread title: ${payload.threadTitle}`
+        : "",
+      payload?.agentName ? `Current acting agent: ${payload.agentName}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
   return [
     "You are answering inside AgentHub chat.",
     "You may answer entirely in normal Markdown. Decide for yourself whether a visual widget would materially improve comprehension, scannability, or usefulness.",
@@ -421,7 +481,9 @@ function buildUiPrompt(payload) {
 async function runQuery(payload) {
   const hub = await readHubConfig();
   const memoryConfig = normalizeMemoryProvider(hub.memory || hub.memos || {});
-  const bundle = payload.threadId ? getThreadBundle(hub, payload.threadId) : null;
+  const bundle = payload.threadId
+    ? getThreadBundle(hub, payload.threadId)
+    : null;
   const invokedTools = new Set();
 
   const agenthubServer = createSdkMcpServer({
@@ -449,7 +511,14 @@ async function runQuery(payload) {
         },
         async ({ query: searchQuery, thread_id, limit }) => {
           invokedTools.add("memory_search");
-          return toToolResult(await memorySearch(memoryConfig, searchQuery, thread_id || payload.threadId, limit ?? 5));
+          return toToolResult(
+            await memorySearch(
+              memoryConfig,
+              searchQuery,
+              thread_id || payload.threadId,
+              limit ?? 5,
+            ),
+          );
         },
       ),
       tool(
@@ -460,7 +529,10 @@ async function runQuery(payload) {
         },
         async ({ thread_id }) => {
           invokedTools.add("task_board_read");
-          const nextBundle = getThreadBundle(hub, thread_id || payload.threadId);
+          const nextBundle = getThreadBundle(
+            hub,
+            thread_id || payload.threadId,
+          );
           if (!nextBundle) {
             return toToolResult({ error: "thread_not_found" });
           }
@@ -480,7 +552,10 @@ async function runQuery(payload) {
         },
         async ({ thread_id }) => {
           invokedTools.add("workspace_summary");
-          const nextBundle = getThreadBundle(hub, thread_id || payload.threadId);
+          const nextBundle = getThreadBundle(
+            hub,
+            thread_id || payload.threadId,
+          );
           if (!nextBundle) {
             return toToolResult({ error: "thread_not_found" });
           }
@@ -559,7 +634,12 @@ async function runQuery(payload) {
   });
 
   for await (const message of stream) {
-    if (message && typeof message === "object" && "session_id" in message && message.session_id) {
+    if (
+      message &&
+      typeof message === "object" &&
+      "session_id" in message &&
+      message.session_id
+    ) {
       sessionId = message.session_id;
     }
 
@@ -602,7 +682,10 @@ async function runQuery(payload) {
       }
     }
 
-    if (message?.type === "tool_progress" && typeof message.tool_name === "string") {
+    if (
+      message?.type === "tool_progress" &&
+      typeof message.tool_name === "string"
+    ) {
       toolsUsed.add(message.tool_name);
     }
 

@@ -1,7 +1,10 @@
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tauri::Emitter;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 #[derive(Serialize)]
 pub struct CliResult {
@@ -28,6 +31,59 @@ struct CustomAgentConfig {
     runtime_profile: CustomRuntimeProfileConfig,
 }
 
+#[derive(Deserialize, Clone)]
+struct ProviderEndpointConfig {
+    #[serde(rename = "baseUrl")]
+    base_url: String,
+    #[serde(rename = "apiType")]
+    api_type: Option<String>,
+}
+
+#[derive(Deserialize, Clone)]
+struct ProviderConfig {
+    id: String,
+    name: Option<String>,
+    #[serde(rename = "apiKey")]
+    api_key: Option<String>,
+    endpoints: Option<Vec<ProviderEndpointConfig>>,
+    #[serde(rename = "baseUrl")]
+    base_url: Option<String>,
+    #[serde(rename = "apiType")]
+    api_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioTranscriptionPayload {
+    pub audio_base64: String,
+    pub mime_type: String,
+    pub provider_id: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioTranscriptionResult {
+    pub text: String,
+    pub provider_id: String,
+    pub provider_name: String,
+    pub model: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveAudioClipPayload {
+    pub audio_base64: String,
+    pub mime_type: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedAudioClipResult {
+    pub file_path: String,
+    pub mime_type: String,
+    pub byte_length: usize,
+}
+
 fn with_augmented_path(cmd: &mut Command) {
     if let Some(home) = dirs::home_dir() {
         let npm_bin = home.join(".npm-global/bin");
@@ -43,6 +99,180 @@ fn with_augmented_path(cmd: &mut Command) {
             ),
         );
     }
+}
+
+fn get_hub_providers() -> Result<Vec<ProviderConfig>, String> {
+    let hub = super::config::read_hub_config()?;
+    let providers = hub
+        .get("providers")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    serde_json::from_value(serde_json::Value::Array(providers))
+        .map_err(|error| format!("Failed to parse provider config: {}", error))
+}
+
+fn agenthub_dir() -> Result<PathBuf, String> {
+    let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
+    let dir = home.join(".agenthub");
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| format!("Failed to create .agenthub dir: {}", error))?;
+    }
+    Ok(dir)
+}
+
+fn agenthub_runtime_dir() -> Result<PathBuf, String> {
+    let dir = agenthub_dir()?.join("runtime");
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| format!("Failed to create runtime dir: {}", error))?;
+    }
+    Ok(dir)
+}
+
+fn agenthub_audio_clips_dir() -> Result<PathBuf, String> {
+    let dir = agenthub_runtime_dir()?.join("audio-clips");
+    if !dir.exists() {
+        std::fs::create_dir_all(&dir)
+            .map_err(|error| format!("Failed to create audio clips dir: {}", error))?;
+    }
+    Ok(dir)
+}
+
+fn resolve_transcription_provider(provider_id: Option<&str>) -> Result<ProviderConfig, String> {
+    let requested_id = provider_id.unwrap_or("bigmodel");
+    let providers = get_hub_providers()?;
+
+    providers
+        .into_iter()
+        .find(|provider| provider.id == requested_id)
+        .ok_or_else(|| format!("Provider '{}' not found", requested_id))
+}
+
+fn resolve_openai_endpoint(provider: &ProviderConfig) -> Option<String> {
+    if let Some(endpoints) = &provider.endpoints {
+        let preferred = endpoints
+            .iter()
+            .find(|endpoint| endpoint.api_type.as_deref() == Some("openai"))
+            .or_else(|| endpoints.first());
+        if let Some(endpoint) = preferred {
+            return Some(endpoint.base_url.clone());
+        }
+    }
+
+    provider.base_url.clone()
+}
+
+fn transcription_endpoint(base_url: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if base.ends_with("/v1") || base.ends_with("/v3") || base.ends_with("/v4") {
+        format!("{}/audio/transcriptions", base)
+    } else {
+        format!("{}/v1/audio/transcriptions", base)
+    }
+}
+
+fn extension_from_mime_type(mime_type: &str) -> &'static str {
+    match mime_type {
+        "audio/mp4" | "audio/x-m4a" | "audio/aac" => "m4a",
+        "audio/mpeg" | "audio/mp3" => "mp3",
+        "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
+        "audio/ogg" | "audio/ogg;codecs=opus" => "ogg",
+        "audio/webm" | "audio/webm;codecs=opus" => "webm",
+        _ => "bin",
+    }
+}
+
+fn output_content_type(path: &Path) -> &'static str {
+    match path.extension().and_then(|value| value.to_str()).unwrap_or_default() {
+        "wav" => "audio/wav",
+        _ => "audio/mpeg",
+    }
+}
+
+fn decode_audio_payload(audio_base64: &str) -> Result<Vec<u8>, String> {
+    base64::engine::general_purpose::STANDARD
+        .decode(audio_base64.as_bytes())
+        .map_err(|error| format!("Failed to decode recorded audio: {}", error))
+}
+
+fn write_payload_to_temp_audio(
+    audio_base64: &str,
+    mime_type: &str,
+) -> Result<(tempfile::TempDir, PathBuf), String> {
+    let audio_bytes = decode_audio_payload(audio_base64)?;
+    let temp_dir = tempfile::tempdir().map_err(|error| format!("Failed to create temp dir: {}", error))?;
+    let input_extension = extension_from_mime_type(mime_type);
+    let input_path = temp_dir.path().join(format!("speech-input.{}", input_extension));
+    std::fs::write(&input_path, audio_bytes)
+        .map_err(|error| format!("Failed to write audio clip: {}", error))?;
+    Ok((temp_dir, input_path))
+}
+
+fn persist_prepared_audio_file(prepared_path: &Path) -> Result<PathBuf, String> {
+    let clips_dir = agenthub_audio_clips_dir()?;
+    let extension = prepared_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("mp3");
+    let suffix = format!(".{}", extension);
+    let temp_clip = tempfile::Builder::new()
+        .prefix("clip-")
+        .suffix(&suffix)
+        .tempfile_in(&clips_dir)
+        .map_err(|error| format!("Failed to create persisted audio clip file: {}", error))?;
+
+    std::fs::copy(prepared_path, temp_clip.path())
+        .map_err(|error| format!("Failed to persist audio clip: {}", error))?;
+
+    let (_file, path) = temp_clip
+        .keep()
+        .map_err(|error| format!("Failed to finalize audio clip: {}", error.error))?;
+
+    Ok(path)
+}
+
+fn ensure_supported_audio_file(input_path: &Path) -> Result<PathBuf, String> {
+    let extension = input_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if extension == "mp3" || extension == "wav" {
+        return Ok(input_path.to_path_buf());
+    }
+
+    let output_path = input_path.with_extension("mp3");
+    let mut command = Command::new("ffmpeg");
+    with_augmented_path(&mut command);
+    let output = command
+        .args([
+            "-y",
+            "-i",
+            input_path.to_string_lossy().as_ref(),
+            "-vn",
+            "-acodec",
+            "libmp3lame",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            output_path.to_string_lossy().as_ref(),
+        ])
+        .output()
+        .map_err(|error| format!("Failed to run ffmpeg: {}", error))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "ffmpeg transcode failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    Ok(output_path)
 }
 
 
@@ -151,6 +381,138 @@ pub async fn open_terminal_command(command: String) -> Result<(), String> {
     })
     .await
     .map_err(|error| format!("Failed to run terminal launcher: {}", error))?
+}
+
+#[tauri::command]
+pub async fn prompt_open_microphone_settings(app: tauri::AppHandle) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let should_open = app
+            .dialog()
+            .message("当前没有麦克风权限，请在“隐私与安全性 -> 麦克风”里允许 AgentHub 使用麦克风。")
+            .title("无法使用麦克风")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "打开设置".to_string(),
+                "取消".to_string(),
+            ))
+            .blocking_show();
+
+        if should_open {
+            #[cfg(target_os = "macos")]
+            {
+                Command::new("open")
+                    .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
+                    .status()
+                    .map_err(|error| format!("Failed to open microphone privacy settings: {}", error))?;
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            {
+                return Err("Opening microphone privacy settings is only supported on macOS right now".to_string());
+            }
+        }
+
+        Ok(should_open)
+    })
+    .await
+    .map_err(|error| format!("Failed to show microphone settings dialog: {}", error))?
+}
+
+#[tauri::command]
+pub async fn transcribe_audio_clip(
+    payload: AudioTranscriptionPayload,
+) -> Result<AudioTranscriptionResult, String> {
+    let provider = resolve_transcription_provider(payload.provider_id.as_deref())?;
+    let api_key = provider
+        .api_key
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("Provider '{}' has no API key configured", provider.id))?;
+    let base_url = resolve_openai_endpoint(&provider)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("Provider '{}' has no OpenAI-compatible endpoint configured", provider.id))?;
+    let endpoint = transcription_endpoint(&base_url);
+
+    let (_temp_dir, input_path) = write_payload_to_temp_audio(&payload.audio_base64, &payload.mime_type)?;
+    let upload_path = ensure_supported_audio_file(&input_path)?;
+    let upload_bytes = std::fs::read(&upload_path)
+        .map_err(|error| format!("Failed to read prepared audio clip: {}", error))?;
+    let upload_name = upload_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("speech.mp3")
+        .to_string();
+
+    let form = reqwest::multipart::Form::new()
+        .text("model", "glm-asr-2512")
+        .text("stream", "false")
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(upload_bytes)
+                .file_name(upload_name)
+                .mime_str(output_content_type(&upload_path))
+                .map_err(|error| format!("Failed to build audio upload: {}", error))?,
+        );
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(endpoint)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("User-Agent", "AgentHub/0.1.0")
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|error| format!("Speech transcription request failed: {}", error))?;
+
+    let status = response.status();
+    let response_json = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| format!("Failed to parse speech transcription response: {}", error))?;
+
+    if !status.is_success() {
+        return Err(format!(
+            "Speech transcription API returned {}: {}",
+            status,
+            response_json
+        ));
+    }
+
+    let text = response_json
+        .get("text")
+        .and_then(|value| value.as_str())
+        .or_else(|| response_json.pointer("/data/text").and_then(|value| value.as_str()))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    if text.is_empty() {
+        return Err(format!("Speech transcription returned no text: {}", response_json));
+    }
+
+    Ok(AudioTranscriptionResult {
+        text,
+        provider_id: provider.id,
+        provider_name: provider.name.unwrap_or_else(|| "语音转写".to_string()),
+        model: "glm-asr-2512".to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn save_audio_clip(payload: SaveAudioClipPayload) -> Result<SavedAudioClipResult, String> {
+    let (_temp_dir, input_path) = write_payload_to_temp_audio(&payload.audio_base64, &payload.mime_type)?;
+    let prepared_path = ensure_supported_audio_file(&input_path)?;
+    let file_path = persist_prepared_audio_file(&prepared_path)?;
+    let byte_length = std::fs::metadata(&file_path)
+        .map(|metadata| metadata.len() as usize)
+        .map_err(|error| format!("Failed to inspect saved audio clip: {}", error))?;
+    let mime_type = output_content_type(&file_path).to_string();
+
+    Ok(SavedAudioClipResult {
+        file_path: file_path.to_string_lossy().to_string(),
+        mime_type,
+        byte_length,
+    })
 }
 
 #[tauri::command]

@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Loader2 } from "lucide-react";
+import { Loader2, Mic, Pause, Play, Volume2, VolumeX } from "lucide-react";
 import { toast } from "sonner";
 import { MessageBlocksRenderer } from "@/components/chat/MessageBlocksRenderer";
 import { parseMessageContent } from "@/lib/chat/message-blocks";
@@ -12,6 +13,7 @@ import type { MessagePart, RuntimeMessageMetadata } from "@/lib/types/chat";
 import type { RuntimeStreamEvent } from "@/lib/runtime/types";
 import { cn } from "@/lib/utils";
 import type { AgentSessionRef, HandoffPacket, TaskBoard, TaskEvent, ThreadBundle } from "@/lib/types/collaboration";
+import { useSpeechTranscription } from "@/hooks/useSpeechTranscription";
 import { useAgentsStore } from "@/stores/agents-store";
 import { useCollaborationStore } from "@/stores/collaboration-store";
 
@@ -24,6 +26,15 @@ interface Message {
   agent: string;
   metadata?: RuntimeMessageMetadata;
   timestamp: number;
+  audioClip?: AudioClipAttachment;
+}
+
+interface AudioClipAttachment {
+  filePath: string;
+  mimeType: string;
+  durationMs: number;
+  byteLength?: number;
+  transcript?: string;
 }
 
 const DRAFT_BUCKET = "__draft__";
@@ -43,6 +54,38 @@ function formatThreadTitle(input: string) {
   }
 
   return trimmed.length > 24 ? `${trimmed.slice(0, 24)}…` : trimmed;
+}
+
+function formatMessageTimestamp(timestamp: number) {
+  const date = new Date(timestamp);
+  const now = new Date();
+  const sameYear = date.getFullYear() === now.getFullYear();
+  const sameDay =
+    sameYear &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate();
+
+  if (sameDay) {
+    return date.toLocaleTimeString("zh-CN", {
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    ...(sameYear ? {} : { year: "numeric" }),
+  });
+}
+
+function formatAudioDuration(durationMs: number) {
+  const totalSeconds = Math.max(1, Math.round(durationMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
 function shouldShowComposerPreview(source: string) {
@@ -154,6 +197,29 @@ function buildMessagesFromEvents(events: TaskEvent[]): Message[] {
     .sort((left, right) => left.created_at.localeCompare(right.created_at))
     .map((event) => {
       const payload = event.payload ?? {};
+      const audioPayload =
+        event.event_type === "user_message" && payload.audioClip && typeof payload.audioClip === "object"
+          ? (payload.audioClip as Record<string, unknown>)
+          : null;
+      const audioClip =
+        audioPayload &&
+        typeof audioPayload.filePath === "string" &&
+        typeof audioPayload.mimeType === "string"
+          ? {
+              filePath: audioPayload.filePath,
+              mimeType: audioPayload.mimeType,
+              durationMs:
+                typeof audioPayload.durationMs === "number"
+                  ? audioPayload.durationMs
+                  : Number(audioPayload.durationMs ?? 0),
+              byteLength:
+                typeof audioPayload.byteLength === "number"
+                  ? audioPayload.byteLength
+                  : Number(audioPayload.byteLength ?? 0),
+              transcript:
+                typeof audioPayload.transcript === "string" ? audioPayload.transcript : undefined,
+            }
+          : undefined;
       const rawText =
         event.event_type === "assistant_message" && typeof payload.rawText === "string"
           ? payload.rawText
@@ -163,7 +229,12 @@ function buildMessagesFromEvents(events: TaskEvent[]): Message[] {
       return {
         id: event.id,
         role: event.event_type === "user_message" ? "user" : "assistant",
-        content: event.event_type === "assistant_message" ? parsed.text : event.body ?? "",
+        content:
+          event.event_type === "assistant_message"
+            ? parsed.text
+            : audioClip
+              ? audioClip.transcript || event.body || "语音消息"
+              : event.body ?? "",
         rawText: event.event_type === "assistant_message" ? parsed.rawText : undefined,
         parts:
           event.event_type === "assistant_message"
@@ -175,8 +246,162 @@ function buildMessagesFromEvents(events: TaskEvent[]): Message[] {
             ? (payload.metadata as RuntimeMessageMetadata)
             : undefined,
         timestamp: Number.isNaN(Date.parse(event.created_at)) ? Date.now() : Date.parse(event.created_at),
+        audioClip,
       };
     });
+}
+
+function plainTextForSpeech(text: string) {
+  return text
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\[(.*?)\]\((.*?)\)/g, "$1")
+    .replace(/[*_>#-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildVoiceDraft(base: string, committed: string, interim = "") {
+  return [base.trim(), committed.trim(), interim.trim()].filter(Boolean).join(" ").trim();
+}
+
+function VoiceLevelIndicator({ level, bands }: { level: number; bands?: number[] }) {
+  const visualBands =
+    bands && bands.length > 0
+      ? bands
+      : [0.34, 0.58, 0.86, 0.58, 0.34].map((base, index) => Math.min(1, base + level * (0.9 - index * 0.08)));
+
+  return (
+    <span className="inline-flex h-4 items-end gap-[2px]" aria-hidden="true">
+      {visualBands.map((value, index) => (
+        <span
+          key={index}
+          className="w-[2px] rounded-full bg-emerald-600/90 transition-[height,opacity] duration-75"
+          style={{
+            height: `${4 + Math.max(0.08, value) * 13}px`,
+            opacity: 0.42 + Math.max(level, value) * 0.58,
+          }}
+        />
+      ))}
+    </span>
+  );
+}
+
+function AudioMessageBubble({ clip, align }: { clip: AudioClipAttachment; align: "left" | "right" }) {
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [loadedDurationMs, setLoadedDurationMs] = useState(clip.durationMs);
+  const audioUrl = convertFileSrc(clip.filePath);
+  const totalDurationMs = loadedDurationMs > 0 ? loadedDurationMs : clip.durationMs;
+  const barHeights = [0.36, 0.62, 0.86, 0.54, 0.48, 0.92, 0.44, 0.7, 0.58, 0.82, 0.4, 0.66];
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    const syncProgress = () => {
+      if (!Number.isFinite(audio.duration) || audio.duration <= 0) {
+        setProgress(0);
+        return;
+      }
+      setProgress(Math.min(1, audio.currentTime / audio.duration));
+    };
+
+    const handleLoadedMetadata = () => {
+      if (Number.isFinite(audio.duration) && audio.duration > 0) {
+        setLoadedDurationMs(Math.round(audio.duration * 1000));
+      }
+      syncProgress();
+    };
+
+    const handlePlay = () => setIsPlaying(true);
+    const handlePause = () => setIsPlaying(false);
+    const handleEnded = () => {
+      setIsPlaying(false);
+      setProgress(1);
+    };
+
+    audio.addEventListener("loadedmetadata", handleLoadedMetadata);
+    audio.addEventListener("timeupdate", syncProgress);
+    audio.addEventListener("play", handlePlay);
+    audio.addEventListener("pause", handlePause);
+    audio.addEventListener("ended", handleEnded);
+
+    return () => {
+      audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
+      audio.removeEventListener("timeupdate", syncProgress);
+      audio.removeEventListener("play", handlePlay);
+      audio.removeEventListener("pause", handlePause);
+      audio.removeEventListener("ended", handleEnded);
+    };
+  }, []);
+
+  const togglePlayback = () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    if (audio.paused) {
+      void audio.play().catch((error) => {
+        console.error("Failed to play audio clip:", error);
+      });
+    } else {
+      audio.pause();
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={togglePlayback}
+      className={cn(
+        "group flex w-[260px] items-center gap-3 rounded-2xl border px-3 py-3 text-left transition-colors",
+        align === "right"
+          ? "border-emerald-400/15 bg-emerald-500/10 text-emerald-950/90"
+          : "border-border/60 bg-background/70 text-foreground",
+      )}
+    >
+      <span
+        className={cn(
+          "flex h-8 w-8 shrink-0 items-center justify-center rounded-full",
+          align === "right" ? "bg-emerald-600 text-white" : "bg-foreground/10 text-foreground",
+        )}
+      >
+        {isPlaying ? <Pause size={14} /> : <Play size={14} className="translate-x-[1px]" />}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="relative flex h-9 items-end gap-[3px] overflow-hidden rounded-xl bg-black/5 px-2 py-1.5">
+          <span
+            className={cn(
+              "absolute inset-y-0 left-0 rounded-xl transition-[width] duration-150",
+              align === "right" ? "bg-emerald-500/18" : "bg-foreground/8",
+            )}
+            style={{ width: `${Math.max(6, progress * 100)}%` }}
+          />
+          {barHeights.map((height, index) => (
+            <span
+              key={index}
+              className={cn(
+                "relative z-[1] w-[3px] rounded-full",
+                align === "right" ? "bg-emerald-600/80" : "bg-foreground/55",
+              )}
+              style={{ height: `${10 + height * 15}px` }}
+            />
+          ))}
+        </span>
+      </span>
+      <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+        {formatAudioDuration(totalDurationMs)}
+      </span>
+      <audio ref={audioRef} src={audioUrl} preload="metadata" />
+    </button>
+  );
+}
+
+interface SendPayload {
+  displayText?: string;
+  runtimeText: string;
+  audioClip?: AudioClipAttachment;
 }
 
 export default function ChatPage() {
@@ -198,8 +423,26 @@ export default function ChatPage() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [sendingLabel, setSendingLabel] = useState("");
+  const [voiceReplyEnabled, setVoiceReplyEnabled] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const voiceBaseInputRef = useRef("");
+  const voiceAutoSendRef = useRef(false);
+  const voicePendingReplyRef = useRef(false);
+  const lastSpokenMessageIdRef = useRef<string | null>(null);
+
+  const {
+    supported: voiceInputSupported,
+    isListening,
+    isTranscribing,
+    audioLevel,
+    audioBands,
+    lastError: voiceError,
+    lastErrorCode: voiceErrorCode,
+    startListening,
+    stopListening,
+    clearError: clearVoiceError,
+  } = useSpeechTranscription();
 
   useEffect(() => {
     void loadThreads();
@@ -261,6 +504,21 @@ export default function ChatPage() {
   }, [messages, selectedThreadId]);
 
   useEffect(() => {
+    if (!voiceError) return;
+    const canOpenMicSettings = voiceErrorCode === "not-allowed" || voiceErrorCode === "service-not-allowed";
+
+    if (canOpenMicSettings) {
+      void invoke<boolean>("prompt_open_microphone_settings").catch((error) => {
+        console.error("Failed to show native microphone settings dialog:", error);
+        toast.error("没能弹出系统权限提示，请手动前往“隐私与安全性 -> 麦克风”。");
+      });
+    } else {
+      toast.error(voiceError);
+    }
+    clearVoiceError();
+  }, [clearVoiceError, voiceError, voiceErrorCode]);
+
+  useEffect(() => {
     if (!currentBundle) return;
     const restoredMessages = buildMessagesFromEvents(currentBundle.events);
     setMessageMap((prev) => ({
@@ -268,6 +526,39 @@ export default function ChatPage() {
       [currentBundle.thread.id]: restoredMessages,
     }));
   }, [currentBundle]);
+
+  useEffect(() => {
+    const lastAssistant = [...messages].reverse().find((message) => message.role === "assistant");
+    lastSpokenMessageIdRef.current = lastAssistant?.id ?? null;
+    voicePendingReplyRef.current = false;
+    voiceBaseInputRef.current = "";
+    voiceAutoSendRef.current = false;
+    if (typeof window !== "undefined") {
+      window.speechSynthesis?.cancel();
+    }
+  }, [selectedThreadId]);
+
+  useEffect(() => {
+    const synthesis = typeof window !== "undefined" ? window.speechSynthesis : null;
+    const lastMessage = [...messages].reverse().find((message) => message.role === "assistant");
+    if (!lastMessage) return;
+    if (lastSpokenMessageIdRef.current === lastMessage.id) return;
+
+    const shouldSpeak = voiceReplyEnabled || voicePendingReplyRef.current;
+    if (!shouldSpeak || !synthesis) return;
+
+    const speechText = plainTextForSpeech(lastMessage.rawText || lastMessage.content);
+    if (!speechText) return;
+
+    synthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(speechText);
+    utterance.lang = "zh-CN";
+    utterance.rate = 1;
+    utterance.pitch = 1;
+    synthesis.speak(utterance);
+    lastSpokenMessageIdRef.current = lastMessage.id;
+    voicePendingReplyRef.current = false;
+  }, [messages, voiceReplyEnabled]);
 
   const updateParams = (next: { agentId?: string; threadId?: string | null }) => {
     const params = new URLSearchParams(searchParams);
@@ -329,11 +620,11 @@ export default function ChatPage() {
     }
   };
 
-  const ensureThreadForChat = async () => {
+  const ensureThreadForChat = async (seedText: string) => {
     if (selectedThreadId) return selectedThreadId;
     const bundle = await createThread({
-      title: formatThreadTitle(input),
-      goal: input.trim(),
+      title: formatThreadTitle(seedText),
+      goal: seedText.trim(),
       primaryAgentId: selectedAgentId || undefined,
     });
     updateParams({ threadId: bundle.thread.id, agentId: selectedAgentId });
@@ -373,9 +664,16 @@ export default function ChatPage() {
     }
   };
 
-  const send = async () => {
-    if (!input.trim() || !selectedAgentId || sending) return;
-    const switchCommand = parseAgentSwitchCommand(input);
+  const send = async (override?: string | SendPayload) => {
+    const payload =
+      typeof override === "string"
+        ? { runtimeText: override, displayText: override }
+        : override ?? { runtimeText: input, displayText: input };
+    const runtimeText = payload.runtimeText.trim();
+    const displayText = (payload.displayText ?? payload.runtimeText).trim();
+    const threadSeed = runtimeText || displayText;
+    if (!runtimeText || !selectedAgentId || sending) return;
+    const switchCommand = payload.audioClip ? null : parseAgentSwitchCommand(runtimeText);
     if (switchCommand) {
       const nextAgent = findAgentByCommand(switchCommand.target, visibleAgents);
       if (!switchCommand.target) {
@@ -392,8 +690,8 @@ export default function ChatPage() {
       return;
     }
 
-    const threadId = await ensureThreadForChat();
-    const userContent = input.trim();
+    const threadId = await ensureThreadForChat(threadSeed);
+    const userContent = runtimeText;
     const previousAgentId = messages[messages.length - 1]?.agent ?? null;
     const agentName = agent?.name || selectedAgentId;
     if (!agent) {
@@ -416,10 +714,11 @@ export default function ChatPage() {
     const userMsg: Message = {
       id: crypto.randomUUID(),
       role: "user",
-      content: userContent,
-      parts: [{ type: "text", content: userContent }],
+      content: displayText || userContent,
+      parts: [{ type: "text", content: displayText || userContent }],
       agent: selectedAgentId,
       timestamp: Date.now(),
+      audioClip: payload.audioClip,
     };
 
     appendMessage(threadId, userMsg);
@@ -480,7 +779,17 @@ export default function ChatPage() {
         agentId: selectedAgentId,
         sessionId: session.id,
         taskId: null,
-        payload: null,
+        payload: payload.audioClip
+          ? {
+              audioClip: {
+                filePath: payload.audioClip.filePath,
+                mimeType: payload.audioClip.mimeType,
+                durationMs: payload.audioClip.durationMs,
+                byteLength: payload.audioClip.byteLength ?? 0,
+                transcript: userContent,
+              },
+            }
+          : null,
       });
 
       void persistChatSnapshot({
@@ -524,9 +833,19 @@ export default function ChatPage() {
         });
       }
 
-      const runtimePrompt = handoff
-        ? formatContextPrompt(handoff, bundleTasks, includeRecentContext)
+      const basePrompt = payload.audioClip
+        ? `用户发送了一段语音消息（时长 ${formatAudioDuration(payload.audioClip.durationMs)}）。以下是系统转写内容：\n${userContent}`
         : userContent;
+      const runtimePrompt = handoff
+        ? formatContextPrompt(
+            {
+              ...handoff,
+              latest_user_message: basePrompt,
+            },
+            bundleTasks,
+            includeRecentContext,
+          )
+        : basePrompt;
 
       const runtimeResult = await runtime.sendMessage({
         agent,
@@ -604,6 +923,7 @@ export default function ChatPage() {
       if (streamingAssistantId) {
         removeMessage(threadId, streamingAssistantId);
       }
+      voicePendingReplyRef.current = false;
       toast.error(`发送失败: ${error}`);
     } finally {
       stopStreamListener?.();
@@ -615,6 +935,63 @@ export default function ChatPage() {
 
   const showComposerPreview = shouldShowComposerPreview(input);
   const agentSwitchCommand = parseAgentSwitchCommand(input);
+  const canSpeakReply =
+    typeof window !== "undefined" &&
+    "speechSynthesis" in window &&
+    typeof SpeechSynthesisUtterance !== "undefined";
+
+  const toggleVoiceInput = async () => {
+    if (isListening) {
+      const shouldAutoSend = voiceAutoSendRef.current;
+      voiceAutoSendRef.current = false;
+      const capture = await stopListening();
+      const transcript = capture?.transcript.trim() ?? "";
+      const finalDraft = buildVoiceDraft(voiceBaseInputRef.current, transcript);
+      voiceBaseInputRef.current = "";
+
+      if (!capture) {
+        if (!shouldAutoSend) {
+          setInput(finalDraft);
+        }
+        return;
+      }
+
+      if (shouldAutoSend && transcript && !sending) {
+        voicePendingReplyRef.current = true;
+        void send({
+          displayText: "语音消息",
+          runtimeText: transcript,
+          audioClip: {
+            ...capture.audioClip,
+            transcript,
+          },
+        });
+      } else {
+        setInput(finalDraft);
+      }
+      return;
+    }
+
+    if (!voiceInputSupported) {
+      toast.error("当前环境还不支持语音输入。");
+      return;
+    }
+
+    if (typeof window !== "undefined") {
+      window.speechSynthesis?.cancel();
+    }
+
+    voiceAutoSendRef.current = input.trim().length === 0;
+    voiceBaseInputRef.current = voiceAutoSendRef.current ? "" : input;
+    if (voiceAutoSendRef.current) {
+      setInput("");
+    }
+    const started = await startListening();
+    if (!started) {
+      voiceAutoSendRef.current = false;
+      voiceBaseInputRef.current = "";
+    }
+  };
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -634,10 +1011,30 @@ export default function ChatPage() {
           )}
 
           {messages.map((message) => (
-            <div key={message.id} className={cn("flex", message.role === "user" ? "justify-end" : "justify-start")}>
-              <div className={cn("max-w-[80%] rounded-2xl px-4 py-2.5", message.role === "user" ? "glass" : "")}>
+            <div
+              key={message.id}
+              className={cn("flex flex-col gap-1", message.role === "user" ? "items-end" : "items-start")}
+            >
+              <span className="px-1 text-[11px] text-muted-foreground/80">
+                {formatMessageTimestamp(message.timestamp)}
+              </span>
+              <div
+                className={cn(
+                  "max-w-[80%] rounded-2xl",
+                  message.audioClip
+                    ? ""
+                    : message.role === "user"
+                      ? "glass px-4 py-2.5"
+                      : "px-4 py-2.5",
+                )}
+              >
                 {message.role === "assistant" ? (
                   <MessageBlocksRenderer parts={message.parts} />
+                ) : message.audioClip ? (
+                  <AudioMessageBubble
+                    clip={message.audioClip}
+                    align={message.role === "user" ? "right" : "left"}
+                  />
                 ) : (
                   <div className={MESSAGE_MARKDOWN_CLASS}>
                     <Markdown remarkPlugins={[remarkGfm]}>{message.content}</Markdown>
@@ -660,18 +1057,46 @@ export default function ChatPage() {
           <div className="glass rounded-2xl px-4 py-3">
             <div className="mb-2 flex items-center justify-between gap-3">
               <span className="text-[11px] text-muted-foreground">
-                {agentSwitchCommand
-                  ? "输入 /agent dolphin 这样的命令可以切换 Agent"
-                  : showComposerPreview
-                    ? "检测到 Markdown，下面会实时预览"
-                    : "Enter 换行，Cmd/Ctrl+Enter 发送"}
+                {isTranscribing
+                  ? "正在转写刚才的语音..."
+                  : isListening
+                    ? voiceAutoSendRef.current
+                      ? "正在录音，再点一次即可结束并发送语音消息"
+                      : "正在录音，再点一次即可结束并追加到输入框"
+                    : agentSwitchCommand
+                      ? "输入 /agent dolphin 这样的命令可以切换 Agent"
+                    : showComposerPreview
+                      ? "检测到 Markdown，下面会实时预览"
+                      : "Enter 换行，Cmd/Ctrl+Enter 发送"}
               </span>
-              {bundleLoading && (
-                <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
-                  <Loader2 size={12} className="animate-spin" />
-                  <span>同步中</span>
-                </span>
-              )}
+              <div className="flex items-center gap-2">
+                {canSpeakReply && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (voiceReplyEnabled && typeof window !== "undefined") {
+                        window.speechSynthesis?.cancel();
+                      }
+                      setVoiceReplyEnabled((current) => !current);
+                    }}
+                    className={cn(
+                      "inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[11px] transition-colors",
+                      voiceReplyEnabled
+                        ? "border-emerald-400/60 bg-emerald-400/10 text-emerald-700"
+                        : "border-border/60 text-muted-foreground hover:bg-foreground/5",
+                    )}
+                  >
+                    {voiceReplyEnabled ? <Volume2 size={12} /> : <VolumeX size={12} />}
+                    <span>{voiceReplyEnabled ? "自动朗读" : "静音回复"}</span>
+                  </button>
+                )}
+                {bundleLoading && (
+                  <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+                    <Loader2 size={12} className="animate-spin" />
+                    <span>同步中</span>
+                  </span>
+                )}
+              </div>
             </div>
 
             <div className="flex items-end gap-2">
@@ -706,6 +1131,30 @@ export default function ChatPage() {
                 )}
               </div>
               <button
+                type="button"
+                onClick={() => {
+                  void toggleVoiceInput();
+                }}
+                disabled={!selectedAgentId || sending || isTranscribing}
+                className={cn(
+                  "flex h-7 w-7 shrink-0 items-center justify-center transition-colors",
+                  isListening ? "text-emerald-700" : "text-muted-foreground hover:text-foreground",
+                  (!selectedAgentId || sending || isTranscribing) && "cursor-not-allowed opacity-50",
+                )}
+                title={
+                  isListening
+                    ? "停止语音输入"
+                    : isTranscribing
+                      ? "正在转写语音"
+                    : input.trim()
+                      ? "开始听写，识别结果会追加到输入框"
+                      : "开始语音直发，停下后会自动发送"
+                }
+              >
+                {isListening ? <VoiceLevelIndicator level={audioLevel} bands={audioBands} /> : <Mic size={16} />}
+              </button>
+              <button
+                type="button"
                 onClick={() => {
                   void send();
                 }}

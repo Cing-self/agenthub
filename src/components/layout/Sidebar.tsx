@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Plug, Wrench, Zap, Lock, Settings, RefreshCw, Loader2,
   BarChart3, Eye, Brain, Network, DollarSign, User, Cloud,
   MessageSquare, ListTodo, Clock, Send, Terminal,
-  ChevronDown, ChevronRight, Radio,
+  ChevronDown, ChevronRight, Radio, Bot,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
@@ -11,6 +11,7 @@ import { useAgentsStore } from "@/stores/agents-store";
 import { useModeStore } from "@/stores/mode-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { useCollaborationStore } from "@/stores/collaboration-store";
+import type { DetectedAgent } from "@/lib/types/agents";
 
 interface NavItem { label: string; icon: React.ReactNode; path: string; }
 
@@ -59,6 +60,147 @@ function formatNewThreadTitle() {
     hour: "2-digit",
     minute: "2-digit",
   })}`;
+}
+
+function resolveRuntimeFamily(agent: DetectedAgent | undefined) {
+  if (!agent) return "";
+  return agent.runtime_family ?? agent.runtime_profile?.runtime_family ?? agent.agent_type;
+}
+
+function resolveCurrentAgent(
+  agents: DetectedAgent[],
+  pathname: string,
+  queryAgentId: string,
+  currentBundleAgentId: string,
+  selectedAgentId: string,
+) {
+  const routeAgentId = pathname.match(/^\/agent\/([^/]+)/)?.[1] ?? "";
+  const activeAgents = agents.filter((agent) => agent.running);
+  const fallbackAgent = activeAgents[0] ?? agents[0] ?? null;
+  const candidateIds = [routeAgentId, queryAgentId, currentBundleAgentId, selectedAgentId].filter(Boolean);
+
+  for (const candidateId of candidateIds) {
+    const matched = agents.find((agent) => agent.id === candidateId);
+    if (matched) return matched;
+  }
+
+  return fallbackAgent;
+}
+
+function CurrentAgentResources() {
+  const location = useLocation();
+  const [searchParams] = useSearchParams();
+  const { agents, selectedAgentId } = useAgentsStore();
+  const { currentBundle } = useCollaborationStore();
+
+  const currentAgent = resolveCurrentAgent(
+    agents,
+    location.pathname,
+    searchParams.get("agent") ?? "",
+    currentBundle?.thread.primary_agent_id ?? "",
+    selectedAgentId ?? "",
+  );
+
+  if (!currentAgent) return null;
+
+  const runtimeFamily = resolveRuntimeFamily(currentAgent);
+  const overviewPath = `/agent/${currentAgent.id}`;
+  const skillsPath = runtimeFamily === "claude-code" ? `${overviewPath}/skills` : "/skills";
+  const channelsPath = runtimeFamily === "openclaw" ? `${overviewPath}/channels` : "/channels";
+
+  const skillsMeta =
+    currentAgent.details.type === "custom-agent"
+      ? `${currentAgent.details.skill_directory_count} 个`
+      : "has_skills" in currentAgent.details
+        ? currentAgent.details.has_skills
+          ? "已启用"
+          : "未启用"
+        : "查看";
+
+  const channelMeta =
+    currentAgent.details.type === "openclaw"
+      ? [
+          currentAgent.details.has_discord,
+          currentAgent.details.has_telegram,
+          currentAgent.details.has_whatsapp,
+          currentAgent.details.has_feishu,
+          currentAgent.details.has_slack,
+          currentAgent.details.has_weixin,
+        ].filter(Boolean).length
+      : null;
+
+  return (
+    <>
+      <div className="px-3 pt-1 pb-1">
+        <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/70">当前 Agent</span>
+      </div>
+      <div className="px-2">
+        <NavLink
+          to={overviewPath}
+          end
+          className={({ isActive }) =>
+            cn(
+              "flex items-center gap-2.5 rounded-xl px-3 py-2 transition-colors",
+              isActive ? "bg-foreground/[0.045] text-foreground font-medium" : "text-sidebar-foreground hover:bg-foreground/[0.045] hover:text-foreground",
+            )
+          }
+        >
+          <span className="text-base leading-none">{currentAgent.icon}</span>
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-[13px] font-medium">{currentAgent.name}</div>
+            <div className="truncate text-[11px] text-muted-foreground">{runtimeFamily || currentAgent.agent_type}</div>
+          </div>
+          <span className={cn("h-1.5 w-1.5 rounded-full", currentAgent.running ? "bg-emerald-400" : "bg-zinc-500/50")} />
+        </NavLink>
+
+        <div className="mt-0.5 flex flex-col gap-0.5">
+          <NavLink
+            to={overviewPath}
+            end
+            className={({ isActive }) =>
+              cn(
+                "flex items-center gap-2.5 rounded-xl px-3 py-2 text-[12px] transition-colors",
+                isActive ? "bg-foreground/[0.045] text-foreground font-medium" : "text-sidebar-foreground hover:bg-foreground/[0.045] hover:text-foreground",
+              )
+            }
+          >
+            <Bot size={14} />
+            <span className="flex-1">资源</span>
+          </NavLink>
+
+          <NavLink
+            to={skillsPath}
+            className={({ isActive }) =>
+              cn(
+                "flex items-center gap-2.5 rounded-xl px-3 py-2 text-[12px] transition-colors",
+                isActive ? "bg-foreground/[0.045] text-foreground font-medium" : "text-sidebar-foreground hover:bg-foreground/[0.045] hover:text-foreground",
+              )
+            }
+          >
+            <Zap size={14} />
+            <span className="flex-1">Skills</span>
+            <span className="text-[10px] text-muted-foreground/70">{skillsMeta}</span>
+          </NavLink>
+
+          <NavLink
+            to={channelsPath}
+            className={({ isActive }) =>
+              cn(
+                "flex items-center gap-2.5 rounded-xl px-3 py-2 text-[12px] transition-colors",
+                isActive ? "bg-foreground/[0.045] text-foreground font-medium" : "text-sidebar-foreground hover:bg-foreground/[0.045] hover:text-foreground",
+              )
+            }
+          >
+            <Radio size={14} />
+            <span className="flex-1">Channels</span>
+            <span className="text-[10px] text-muted-foreground/70">
+              {channelMeta == null ? "查看" : channelMeta > 0 ? `${channelMeta} 个` : "未配置"}
+            </span>
+          </NavLink>
+        </div>
+      </div>
+    </>
+  );
 }
 
 function WorkChatThreads({ collapsed }: { collapsed: boolean }) {
@@ -276,7 +418,7 @@ export function Sidebar() {
     <aside
       className={cn(
         "shrink-0 overflow-hidden bg-sidebar transition-[width,opacity,transform,border-color,background-color] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]",
-        collapsed ? "w-0 -translate-x-2 border-r-0 opacity-0" : "w-[228px] border-r border-sidebar-border opacity-100",
+        collapsed ? "w-0 -translate-x-2 opacity-0" : "w-[228px] opacity-100",
       )}
     >
       <div className="flex h-full min-h-0 w-[228px] flex-col">
@@ -309,6 +451,7 @@ export function Sidebar() {
         <div className="flex-1 overflow-y-auto px-0 pt-1">
           {mode === "work" ? (
             <>
+              <CurrentAgentResources />
               <div className="px-3 pt-1 pb-1">
                 <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground/70">工作</span>
               </div>

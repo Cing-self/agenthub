@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>Lobster Chat</title>
+    <link rel="stylesheet" href="./styles.css?v=20260403b" />
+  </head>
+  <body>
+    <div id="sheet-overlay" class="scrim" hidden></div>
+
+    <aside id="history-sheet" class="history-sheet" hidden>
+      <div class="sheet-head">
+        <div class="sheet-copy">
+          <p class="eyebrow">Conversations</p>
+          <h2>历史对话</h2>
+        </div>
+        <button id="history-close-btn" class="ghost-btn" type="button" aria-label="关闭历史">
+          完成
+        </button>
+      </div>
+
+      <div class="sheet-actions">
+        <button id="new-thread-btn" class="pill-btn primary" type="button">新对话</button>
+        <button id="refresh-btn" class="pill-btn" type="button">刷新</button>
+      </div>
+
+      <div id="thread-list" class="thread-list"></div>
+    </aside>
+
+    <div id="auth-overlay" class="auth-overlay" hidden>
+      <section class="auth-card">
+        <p class="eyebrow">Secure Access</p>
+        <h2>连接聊天</h2>
+        <p class="auth-copy">
+          正常通过分享链接进入时会自动完成连接。只有连接信息失效时，才需要重新输入连接码。
+        </p>
+
+        <label class="field">
+          <span>连接码</span>
+          <input
+            id="bridge-token"
+            type="password"
+            placeholder="输入连接码"
+            autocomplete="current-password"
+          />
+        </label>
+
+        <button id="connect-btn" class="pill-btn primary auth-btn" type="button">进入聊天</button>
+
+        <div class="auth-foot">
+          <span id="health-badge" class="badge muted">未连接</span>
+          <p id="status-text" class="hint">连接成功后会直接进入聊天页面。</p>
+        </div>
+      </section>
+    </div>
+
+    <main class="chat-shell">
+      <header class="topbar">
+        <button id="history-toggle-btn" class="icon-chip" type="button" aria-label="打开历史">
+          <span aria-hidden="true">‹</span>
+        </button>
+        <div class="topbar-copy">
+          <h1 id="thread-title">Lobster</h1>
+          <p id="thread-meta">本地在线，随时可以开始对话</p>
+        </div>
+        <button id="hero-new-thread-btn" class="icon-chip accent" type="button" aria-label="新对话">
+          <span aria-hidden="true">⋯</span>
+        </button>
+      </header>
+
+      <section id="messages" class="messages empty" aria-live="polite">
+        <div class="empty-state">
+          <div class="empty-day">Today</div>
+          <div class="empty-mark">L</div>
+          <h2>直接开始对话</h2>
+          <p>这里就是聊天窗口本身。历史记录从左侧展开，不会打断当前对话。</p>
+        </div>
+      </section>
+
+      <form id="composer" class="composer">
+        <div class="composer-box">
+          <textarea
+            id="message-input"
+            rows="1"
+            placeholder="发消息给 Lobster"
+          ></textarea>
+          <button id="send-btn" class="send-btn" type="submit" aria-label="发送消息">↑</button>
+        </div>
+        <p id="composer-hint" class="hint">消息会直接发给这台本地机器上的 Agent。</p>
+      </form>
+    </main>
+
+    <template id="thread-item-template">
+      <button class="thread-item" type="button">
+        <div class="thread-top">
+          <span class="thread-name"></span>
+          <span class="thread-time"></span>
+        </div>
+        <div class="thread-preview"></div>
+      </button>
+    </template>
+
+    <template id="message-template">
+      <article class="message">
+        <div class="message-bubble"></div>
+        <div class="message-meta">
+          <span class="message-role"></span>
+          <time class="message-time"></time>
+        </div>
+      </article>
+    </template>
+
+    <script src="./client-config.js?v=20260403b"></script>
+    <script type="module" src="./app.js?v=20260403b"></script>
+  </body>
+</html>

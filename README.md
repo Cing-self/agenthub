@@ -42,6 +42,8 @@ src/                     React app
 src-tauri/               Tauri backend
   src/commands/          Rust command handlers
   scripts/               runtime bridge scripts
+
+web-control/             lightweight remote web client for the local bridge
 ```
 
 ## Run Locally

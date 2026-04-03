@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Loader2 } from "lucide-react";
+import QRCode from "qrcode";
 import { cn } from "@/lib/utils";
 import { SettingsGroup } from "@/components/shared/SettingsGroup";
 import { EditableRow } from "@/components/shared/EditableRow";
@@ -29,6 +30,28 @@ interface RemoteHost {
   status: "connected" | "disconnected" | "scanning";
 }
 
+interface RemoteBridgeStatus {
+  running: boolean;
+  pid: number | null;
+  status: string;
+  port: number | null;
+  token: string | null;
+  localUrls: string[];
+  startedAt: string | null;
+  updatedAt: string | null;
+  lastRequestAt: string | null;
+  lastError: string | null;
+  activeThreadId: string | null;
+  logPath: string;
+}
+
+interface RemoteBridgeLogTail {
+  logPath: string;
+  lines: string[];
+  truncated: boolean;
+  updatedAt: string;
+}
+
 const CONN_OPTIONS = [
   { value: "ssh", label: "SSH 直连" },
   { value: "docker-local", label: "本地 Docker" },
@@ -37,14 +60,19 @@ const CONN_OPTIONS = [
 ];
 
 const HOSTS_PATH = "/Users/dolphin/.agenthub/remote-hosts.json";
+const WEB_CHAT_VERSION = "20260403b";
 
 export default function RemoteHostsPage() {
   const [hosts, setHosts] = useState<RemoteHost[]>([]);
+  const [bridgeStatus, setBridgeStatus] = useState<RemoteBridgeStatus | null>(null);
+  const [bridgeLog, setBridgeLog] = useState<RemoteBridgeLogTail | null>(null);
+  const [bridgeBusy, setBridgeBusy] = useState<"start" | "restart" | "stop" | null>(null);
   const [adding, setAdding] = useState(false);
   const [newConn, setNewConn] = useState<ConnType>("ssh");
   const [form, setForm] = useState({ name: "", host: "", user: "root", port: 22, keyPath: "~/.ssh/id_rsa", containerId: "", wsUrl: "", wsToken: "" });
   const [scanning, setScanning] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [chatQrCode, setChatQrCode] = useState<string>("");
 
   useEffect(() => {
     import("@tauri-apps/api/core").then(async ({ invoke }) => {
@@ -54,6 +82,32 @@ export default function RemoteHostsPage() {
       } catch { /* */ }
     });
   }, []);
+
+  const loadBridgeState = async () => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const [status, logTail] = await Promise.all([
+        invoke<RemoteBridgeStatus>("get_remote_bridge_status"),
+        invoke<RemoteBridgeLogTail>("read_remote_bridge_log", { tailLines: 60 }),
+      ]);
+      setBridgeStatus(status);
+      setBridgeLog(logTail);
+    } catch (error) {
+      console.error("Failed to load remote bridge state:", error);
+    }
+  };
+
+  useEffect(() => {
+    void loadBridgeState();
+  }, []);
+
+  useEffect(() => {
+    if (!bridgeStatus?.running) return;
+    const timer = window.setInterval(() => {
+      void loadBridgeState();
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [bridgeStatus?.running]);
 
   const saveHosts = async (updated: RemoteHost[]) => {
     setHosts(updated);
@@ -88,6 +142,41 @@ export default function RemoteHostsPage() {
   const removeHost = async (id: string) => {
     await saveHosts(hosts.filter(h => h.id !== id));
     toast.success("已删除");
+  };
+
+  const runBridgeAction = async (action: "start" | "restart" | "stop") => {
+    try {
+      setBridgeBusy(action);
+      const { invoke } = await import("@tauri-apps/api/core");
+      if (action === "stop") {
+        await invoke("stop_remote_bridge");
+      } else {
+        await invoke("sync_remote_bridge", { forceRestart: action === "restart" });
+      }
+      await loadBridgeState();
+      toast.success(
+        action === "stop"
+          ? "本机 Bridge 已停止"
+          : action === "restart"
+            ? "本机 Bridge 已重启"
+            : "本机 Bridge 已启动",
+      );
+    } catch (error) {
+      console.error("Failed to run remote bridge action:", error);
+      toast.error(`Bridge 操作失败: ${error}`);
+    } finally {
+      setBridgeBusy(null);
+    }
+  };
+
+  const copyText = async (label: string, value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      toast.success(`已复制${label}`);
+    } catch (error) {
+      console.error(`Failed to copy ${label}:`, error);
+      toast.error(`复制${label}失败`);
+    }
   };
 
   const scanHost = async (id: string, currentHosts?: RemoteHost[]) => {
@@ -157,6 +246,52 @@ export default function RemoteHostsPage() {
   };
 
   const connLabel = (t: ConnType) => CONN_OPTIONS.find(o => o.value === t)?.label || t;
+  const primaryBridgeUrl = bridgeStatus?.localUrls?.[0] || "";
+  const maskedToken = bridgeStatus?.token ? `${bridgeStatus.token.slice(0, 8)}...${bridgeStatus.token.slice(-6)}` : "尚未生成";
+  const publicChatUrl = bridgeStatus?.token
+    ? `https://control.nanobanani.app/?v=${WEB_CHAT_VERSION}#token=${encodeURIComponent(bridgeStatus.token)}`
+    : "";
+  const curlListCommand =
+    primaryBridgeUrl && bridgeStatus?.token
+      ? `curl -H "Authorization: Bearer ${bridgeStatus.token}" ${primaryBridgeUrl}/threads`
+      : "";
+  const curlTurnCommand =
+    primaryBridgeUrl && bridgeStatus?.token
+      ? `curl -X POST -H "Authorization: Bearer ${bridgeStatus.token}" -H "Content-Type: application/json" -d '{"message":"你好","agentId":"dolphin"}' ${primaryBridgeUrl}/turn`
+      : "";
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!publicChatUrl) {
+      setChatQrCode("");
+      return;
+    }
+
+    void QRCode.toDataURL(publicChatUrl, {
+      width: 220,
+      margin: 1,
+      color: {
+        dark: "#1f1a16",
+        light: "#0000",
+      },
+    })
+      .then((dataUrl: string) => {
+        if (!cancelled) {
+          setChatQrCode(dataUrl);
+        }
+      })
+      .catch((error: unknown) => {
+        console.error("Failed to generate chat QR code:", error);
+        if (!cancelled) {
+          setChatQrCode("");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [publicChatUrl]);
 
   return (
     <div className="space-y-6 max-w-xl pb-8">
@@ -164,6 +299,191 @@ export default function RemoteHostsPage() {
         <h1 className="text-lg font-semibold">远程主机</h1>
         <p className="text-[13px] text-muted-foreground mt-0.5">管理远程服务器、Docker 容器和 Gateway 上的 Agent</p>
       </div>
+
+      <SettingsGroup title="本机 Bridge">
+        <div className="px-1 py-2 space-y-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span className={cn("w-1.5 h-1.5 rounded-full", bridgeStatus?.running ? "bg-emerald-500" : "bg-muted-foreground/20")} />
+                <span className="text-[13px] font-medium">Remote Control Bridge</span>
+                <span className="text-[11px] text-muted-foreground">
+                  {bridgeStatus?.running ? "运行中" : bridgeStatus?.status || "未启动"}
+                </span>
+              </div>
+              <p className="text-[12px] text-muted-foreground">
+                把当前这台 Mac 暴露成一个可远程控制的本地 Agent 入口，后面手机和语音入口都可以复用这一层。
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => void runBridgeAction(bridgeStatus?.running ? "restart" : "start")}
+                disabled={bridgeBusy !== null}
+                className="text-[12px] px-3 py-1 rounded-lg bg-foreground text-background hover:bg-foreground/90 transition-colors disabled:opacity-60"
+              >
+                {bridgeBusy === "start" || bridgeBusy === "restart"
+                  ? "处理中..."
+                  : bridgeStatus?.running
+                    ? "重启"
+                    : "启动"}
+              </button>
+              <button
+                onClick={() => void runBridgeAction("stop")}
+                disabled={!bridgeStatus?.running || bridgeBusy !== null}
+                className="text-[12px] px-3 py-1 rounded-lg border border-border text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+              >
+                停止
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-xl border border-border/70 bg-background/60 px-3 py-3">
+              <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">地址</div>
+              <div className="mt-1 text-[12px] break-all text-foreground/90">
+                {primaryBridgeUrl || "启动后生成"}
+              </div>
+              {primaryBridgeUrl && (
+                <button
+                  onClick={() => void copyText("地址", primaryBridgeUrl)}
+                  className="mt-2 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  复制地址
+                </button>
+              )}
+            </div>
+            <div className="rounded-xl border border-border/70 bg-background/60 px-3 py-3">
+              <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Token</div>
+              <div className="mt-1 text-[12px] break-all text-foreground/90">{maskedToken}</div>
+              {bridgeStatus?.token && (
+                <button
+                  onClick={() => void copyText("Token", bridgeStatus.token!)}
+                  className="mt-2 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  复制 Token
+                </button>
+              )}
+            </div>
+          </div>
+
+          {publicChatUrl && (
+            <div className="rounded-xl border border-border/70 bg-background/60 px-3 py-3">
+              <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">手机扫码聊天</div>
+              <div className="mt-3 flex flex-col gap-3 md:flex-row md:items-center">
+                <div className="shrink-0 rounded-2xl border border-border/70 bg-white p-3 shadow-sm">
+                  {chatQrCode ? (
+                    <img
+                      src={chatQrCode}
+                      alt="网页聊天二维码"
+                      className="h-[156px] w-[156px] rounded-lg"
+                    />
+                  ) : (
+                    <div className="flex h-[156px] w-[156px] items-center justify-center text-[12px] text-muted-foreground">
+                      生成二维码中...
+                    </div>
+                  )}
+                </div>
+                <div className="min-w-0 flex-1 space-y-2">
+                  <div className="text-[13px] text-foreground/90">
+                    用手机相机或微信扫一扫，打开后会自动带上连接信息，直接进入聊天页。
+                  </div>
+                  <div className="text-[12px] break-all text-muted-foreground">{publicChatUrl}</div>
+                  <div className="flex gap-3">
+                    <button
+                      onClick={() => void copyText("聊天链接", publicChatUrl)}
+                      className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      复制聊天链接
+                    </button>
+                    <a
+                      href={publicChatUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      打开网页聊天
+                    </a>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {(bridgeStatus?.localUrls?.length ?? 0) > 1 && (
+            <div className="space-y-1">
+              <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">局域网地址</div>
+              <div className="space-y-1">
+                {bridgeStatus?.localUrls.map((url) => (
+                  <div key={url} className="flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-background/50 px-3 py-2">
+                    <span className="text-[12px] font-mono text-foreground/90">{url}</span>
+                    <button
+                      onClick={() => void copyText("地址", url)}
+                      className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      复制
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {(bridgeStatus?.lastRequestAt || bridgeStatus?.activeThreadId || bridgeStatus?.lastError) && (
+            <div className="rounded-xl border border-border/60 bg-background/50 px-3 py-3 text-[12px] text-muted-foreground space-y-1">
+              {bridgeStatus?.lastRequestAt && <div>最近请求：{new Date(bridgeStatus.lastRequestAt).toLocaleString("zh-CN")}</div>}
+              {bridgeStatus?.activeThreadId && <div>最近线程：<span className="font-mono text-foreground/80">{bridgeStatus.activeThreadId}</span></div>}
+              {bridgeStatus?.lastError && <div className="text-red-500/90">最近错误：{bridgeStatus.lastError}</div>}
+            </div>
+          )}
+
+          {curlListCommand && (
+            <div className="space-y-2">
+              <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">快速自测</div>
+              <div className="rounded-xl border border-border/60 bg-background/60 px-3 py-3 space-y-2">
+                <div>
+                  <div className="text-[11px] text-muted-foreground">列出线程</div>
+                  <code className="block mt-1 text-[11px] leading-relaxed break-all text-foreground/90">{curlListCommand}</code>
+                </div>
+                <div>
+                  <div className="text-[11px] text-muted-foreground">远程发一条消息</div>
+                  <code className="block mt-1 text-[11px] leading-relaxed break-all text-foreground/90">{curlTurnCommand}</code>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => void copyText("测试命令", curlListCommand)}
+                    className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    复制列线程命令
+                  </button>
+                  <button
+                    onClick={() => void copyText("测试命令", curlTurnCommand)}
+                    className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    复制发消息命令
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">最近日志</div>
+              <button
+                onClick={() => void loadBridgeState()}
+                className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+              >
+                刷新
+              </button>
+            </div>
+            <div className="rounded-xl border border-border/60 bg-background/60 px-3 py-3">
+              <pre className="max-h-52 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-5 text-foreground/85">
+                {bridgeLog?.lines?.length ? bridgeLog.lines.join("\n") : "暂无日志"}
+              </pre>
+            </div>
+          </div>
+        </div>
+      </SettingsGroup>
 
       <SettingsGroup title={`主机 (${hosts.length})`}>
         {hosts.length === 0 && !adding && (

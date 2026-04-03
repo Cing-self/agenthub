@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/nicedoc/tauri/dev/tooling/cli/schema.json",
   "productName": "AgentHub",
   "version": "0.1.0",
-  "identifier": "com.agenthub.app",
+  "identifier": "com.dolphin.platform",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
