@@ -2,7 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  buildHostSyncRequest,
   buildHostRegistrationPayload,
+  buildRelayApiUrl,
   buildSessionSnapshotPayload,
 } from "../relay-agent.mjs";
 
@@ -62,5 +64,70 @@ test("buildSessionSnapshotPayload maps collaboration threads into relay sessions
     updatedAt: "2026-04-03T12:01:00.000Z",
     primaryAgentId: "claude-code",
     state: "active",
+  });
+});
+
+test("buildRelayApiUrl keeps a single api prefix", () => {
+  assert.equal(
+    buildRelayApiUrl("https://relay.example.workers.dev/api", "/hosts/sync"),
+    "https://relay.example.workers.dev/api/hosts/sync",
+  );
+  assert.equal(
+    buildRelayApiUrl("https://relay.example.workers.dev", "hosts/sync"),
+    "https://relay.example.workers.dev/api/hosts/sync",
+  );
+});
+
+test("buildHostSyncRequest combines host metadata with session snapshot", () => {
+  const request = buildHostSyncRequest({
+    relayBaseUrl: "https://relay.example.workers.dev/api",
+    host: {
+      hostId: "host_123",
+      displayName: "MacBook Pro",
+      platform: "darwin",
+      runtimeVersion: "0.1.0",
+      capabilities: ["turns", "session-list"],
+      connectedAt: "2026-04-03T12:00:00.000Z",
+    },
+    snapshot: {
+      hostId: "host_123",
+      sessions: [
+        {
+          sessionId: "thread_1",
+          hostId: "host_123",
+          title: "Relay v1",
+          summary: "Design work",
+          updatedAt: "2026-04-03T12:01:00.000Z",
+          primaryAgentId: "claude-code",
+          state: "active",
+        },
+      ],
+    },
+  });
+
+  assert.equal(request.url, "https://relay.example.workers.dev/api/hosts/sync");
+  assert.deepEqual(request.body, {
+    hostId: "host_123",
+    host: {
+      hostId: "host_123",
+      displayName: "MacBook Pro",
+      platform: "darwin",
+      runtimeVersion: "0.1.0",
+      status: "online",
+      connectedAt: "2026-04-03T12:00:00.000Z",
+      lastSeenAt: "2026-04-03T12:00:00.000Z",
+      capabilities: ["turns", "session-list"],
+    },
+    sessions: [
+      {
+        sessionId: "thread_1",
+        hostId: "host_123",
+        title: "Relay v1",
+        summary: "Design work",
+        updatedAt: "2026-04-03T12:01:00.000Z",
+        primaryAgentId: "claude-code",
+        state: "active",
+      },
+    ],
   });
 });

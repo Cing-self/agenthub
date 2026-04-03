@@ -40,6 +40,11 @@ struct TurnResponse: Decodable {
     let threadId: String
 }
 
+enum ConnectionMode: String, Codable, Equatable {
+    case relay
+    case direct
+}
+
 struct BridgeConfig: Codable, Equatable {
     var baseURL: String
     var token: String
@@ -48,4 +53,44 @@ struct BridgeConfig: Codable, Equatable {
         baseURL: "https://control.nanobanani.app/api",
         token: ""
     )
+}
+
+struct RelayClientConfig: Codable, Equatable {
+    var relayBaseURL: String
+    var clientId: String
+    var selectedHostId: String?
+    var selectedSessionId: String?
+}
+
+struct MobileConnectionConfig: Codable, Equatable {
+    var preferredMode: ConnectionMode
+    var directBridge: BridgeConfig
+    var relay: RelayClientConfig?
+
+    static let `default` = MobileConnectionConfig(
+        preferredMode: .relay,
+        directBridge: .default,
+        relay: nil
+    )
+}
+
+struct RelayPairingClaim: Decodable, Equatable {
+    let hostId: String
+    let clientId: String
+    let claimedAt: String
+}
+
+struct RelayPairingClaimResponse: Decodable {
+    let ok: Bool
+    let pairing: RelayPairingClaim
+}
+
+struct RelayHostsResponse: Decodable {
+    let ok: Bool
+    let hosts: [RelayHost]
+}
+
+struct RelaySessionsResponse: Decodable {
+    let ok: Bool
+    let sessions: [RelaySession]
 }

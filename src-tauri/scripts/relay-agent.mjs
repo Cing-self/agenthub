@@ -32,6 +32,19 @@ export function buildHostRegistrationPayload(input) {
   };
 }
 
+export function buildRelayApiUrl(relayBaseUrl, pathName) {
+  const normalizedBaseUrl = requiredString(relayBaseUrl, "relayBaseUrl")
+    .replace(/\/+$/, "");
+  const apiBase = normalizedBaseUrl.endsWith("/api")
+    ? normalizedBaseUrl
+    : `${normalizedBaseUrl}/api`;
+  const normalizedPath = String(pathName || "").startsWith("/")
+    ? String(pathName || "")
+    : `/${String(pathName || "")}`;
+
+  return `${apiBase}${normalizedPath}`;
+}
+
 export function buildSessionSnapshotPayload({ hostId, hub }) {
   const normalizedHostId = requiredString(hostId, "hostId");
   const collaboration = hub?.collaboration || {};
@@ -66,6 +79,26 @@ export function buildSessionSnapshotPayload({ hostId, hub }) {
   };
 }
 
+export function buildHostSyncRequest({ relayBaseUrl, host, snapshot }) {
+  const registration = buildHostRegistrationPayload(host);
+  const normalizedSnapshot = {
+    hostId: requiredString(snapshot?.hostId, "snapshot.hostId"),
+    sessions: Array.isArray(snapshot?.sessions) ? snapshot.sessions : [],
+  };
+
+  return {
+    url: buildRelayApiUrl(relayBaseUrl, "/hosts/sync"),
+    body: {
+      hostId: normalizedSnapshot.hostId,
+      host: {
+        ...registration,
+        lastSeenAt: registration.connectedAt,
+      },
+      sessions: normalizedSnapshot.sessions,
+    },
+  };
+}
+
 const projectRoot =
   process.env.AGENTHUB_PROJECT_ROOT ||
   path.resolve(import.meta.dirname, "..", "..");
@@ -94,9 +127,8 @@ async function readHubConfig() {
   }
 }
 
-async function writeState(partial = {}) {
-  const hub = await readHubConfig();
-  const snapshot = buildSessionSnapshotPayload({ hostId, hub });
+async function writeState(partial = {}, snapshot = null) {
+  const nextSnapshot = snapshot || buildSessionSnapshotPayload({ hostId, hub: await readHubConfig() });
   const next = {
     running: true,
     pid: process.pid,
@@ -104,7 +136,7 @@ async function writeState(partial = {}) {
     relayBaseUrl,
     hostId,
     hostDisplayName,
-    sessionCount: snapshot.sessions.length,
+    sessionCount: nextSnapshot.sessions.length,
     startedAt: partial.startedAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     lastSyncAt: new Date().toISOString(),
@@ -137,14 +169,50 @@ export async function runRelayAgent() {
   });
 
   console.log("[relay-agent] starting", registration);
-  await writeState({
-    startedAt: new Date().toISOString(),
-    connectedAt: new Date().toISOString(),
-  });
+
+  async function syncOnce() {
+    const hub = await readHubConfig();
+    const snapshot = buildSessionSnapshotPayload({ hostId, hub });
+
+    if (relayBaseUrl) {
+      const request = buildHostSyncRequest({
+        relayBaseUrl,
+        host: {
+          ...registration,
+          connectedAt: registration.connectedAt,
+        },
+        snapshot,
+      });
+      const response = await fetch(request.url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json",
+        },
+        body: JSON.stringify(request.body),
+      });
+
+      if (!response.ok) {
+        const body = await response.text();
+        throw new Error(`relay sync failed: HTTP ${response.status} ${body.trim()}`);
+      }
+    }
+
+    await writeState({
+      startedAt: registration.connectedAt,
+      connectedAt: registration.connectedAt,
+      lastError: null,
+    }, snapshot);
+  }
+
+  await syncOnce();
 
   const timer = setInterval(() => {
-    void writeState().catch((error) => {
-      console.error("[relay-agent] failed to persist state", error);
+    void syncOnce().catch(async (error) => {
+      console.error("[relay-agent] failed to sync", error);
+      await writeState({
+        lastError: String(error?.message || error),
+      }).catch(() => {});
     });
   }, 5000);
 

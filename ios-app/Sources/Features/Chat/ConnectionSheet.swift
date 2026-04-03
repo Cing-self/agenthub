@@ -3,61 +3,255 @@ import SwiftUI
 struct ConnectionSheet: View {
     @ObservedObject var store: ChatStore
     @Environment(\.dismiss) private var dismiss
+    @State private var pairingInput = ""
     @State private var baseURL = ""
     @State private var token = ""
+    @State private var isShowingDirectForm = false
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section("Bridge") {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    PairingHeroCard()
+
+                    if case .failed(let message) = store.connectionState {
+                        ConnectionIssueCard(message: message)
+                    }
+
+                    PairingEntryCard(
+                        pairingInput: $pairingInput,
+                        isConnecting: store.connectionState == .connecting,
+                        onConnect: connectPairing
+                    )
+
+                    DirectBridgeCard(
+                        baseURL: $baseURL,
+                        token: $token,
+                        isExpanded: $isShowingDirectForm,
+                        onUseDefault: { baseURL = BridgeConfig.default.baseURL },
+                        onConnect: connectDirect
+                    )
+
+                    ConnectionNotesCard()
+                }
+                .padding(18)
+            }
+            .background(sheetBackground.ignoresSafeArea())
+            .navigationTitle("Connect Bridge")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Close") {
+                        dismiss()
+                    }
+                }
+            }
+            .onAppear {
+                pairingInput = ""
+                baseURL = store.connectionConfig.directBridge.baseURL
+                token = store.connectionConfig.directBridge.token
+            }
+        }
+    }
+
+    private var sheetBackground: LinearGradient {
+        LinearGradient(
+            colors: [
+                Color(red: 0.97, green: 0.98, blue: 0.97),
+                Color(red: 0.93, green: 0.95, blue: 0.93),
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    private func connectPairing() {
+        Task {
+            await store.completePairing(from: pairingInput)
+            if case .connected = store.connectionState {
+                dismiss()
+            }
+        }
+    }
+
+    private func connectDirect() {
+        store.applyDirectConfig(baseURL: baseURL, token: token)
+        Task {
+            await store.connectDirect()
+            if case .connected = store.connectionState {
+                dismiss()
+            }
+        }
+    }
+}
+
+private struct PairingHeroCard: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Bring your local agent onto your phone.")
+                .font(.system(size: 26, weight: .bold))
+                .foregroundStyle(.primary)
+
+            Text("Paste the pairing link from AgentHub desktop. This keeps relay onboarding as the default path, then layers voice, notifications, and remote control on top.")
+                .font(.system(size: 15))
+                .foregroundStyle(.secondary)
+        }
+        .padding(22)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.white.opacity(0.86), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+    }
+}
+
+private struct ConnectionIssueCard: View {
+    let message: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(.red)
+                .frame(width: 38, height: 38)
+                .background(Color.red.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Connection issue")
+                    .font(.system(size: 17, weight: .semibold))
+                Text(message)
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.white.opacity(0.86), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+    }
+}
+
+private struct PairingEntryCard: View {
+    @Binding var pairingInput: String
+    let isConnecting: Bool
+    let onConnect: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Pair with desktop")
+                .font(.system(size: 18, weight: .semibold))
+
+            TextField("Paste pairing link", text: $pairingInput, axis: .vertical)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .lineLimit(3 ... 6)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+                .background(Color.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+            Button(action: onConnect) {
+                HStack {
+                    Text(isConnecting ? "Pairing..." : "Pair and connect")
+                        .font(.system(size: 16, weight: .semibold))
+                    Spacer()
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 18)
+                .padding(.vertical, 16)
+                .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .disabled(pairingInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isConnecting)
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.white.opacity(0.86), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+    }
+}
+
+private struct DirectBridgeCard: View {
+    @Binding var baseURL: String
+    @Binding var token: String
+    @Binding var isExpanded: Bool
+    let onUseDefault: () -> Void
+    let onConnect: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Advanced")
+                        .font(.system(size: 18, weight: .semibold))
+                    Text("Keep direct bridge for local debugging while relay text turn is still landing.")
+                        .font(.system(size: 14))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                Button(isExpanded ? "Hide" : "Show") {
+                    withAnimation(.spring(response: 0.28, dampingFraction: 0.9)) {
+                        isExpanded.toggle()
+                    }
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 14, weight: .semibold))
+            }
+
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 12) {
                     TextField("Base URL", text: $baseURL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .textContentType(.URL)
                         .keyboardType(.URL)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 14)
+                        .background(Color.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
                     SecureField("Token", text: $token)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 14)
+                        .background(Color.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
-                Section("推荐") {
-                    Button("使用默认 Cloudflare 控制入口") {
-                        baseURL = BridgeConfig.default.baseURL
+                    HStack {
+                        Button("Use default Cloudflare entry", action: onUseDefault)
+                            .buttonStyle(.plain)
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(Color.accentColor)
+
+                        Spacer()
+
+                        Button("Connect direct", action: onConnect)
+                            .buttonStyle(.plain)
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 12)
+                            .background(Color.black.opacity(0.84), in: Capsule())
                     }
                 }
-
-                Section("说明") {
-                    Text("这版先直接连接现有 remote bridge。后面语音、远程控制、设备权限都在这个原生 App 里继续扩。")
-                        .font(.system(size: 14))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .navigationTitle("连接本地 Agent")
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("取消") {
-                        dismiss()
-                    }
-                }
-
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("连接") {
-                        store.applyConfig(baseURL: baseURL, token: token)
-                        Task {
-                            await store.connect()
-                            if case .connected = store.connectionState {
-                                dismiss()
-                            }
-                        }
-                    }
-                    .fontWeight(.semibold)
-                }
-            }
-            .onAppear {
-                baseURL = store.config.baseURL
-                token = store.config.token
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.white.opacity(0.86), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+    }
+}
+
+private struct ConnectionNotesCard: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("What this connection is for")
+                .font(.system(size: 18, weight: .semibold))
+
+            Text("This app talks to the remote control contract directly. Pairing gets you hosts and sessions first. Voice, approvals, and media will ride on the same connection model later.")
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
     }
 }

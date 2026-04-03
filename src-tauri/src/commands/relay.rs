@@ -206,6 +206,26 @@ pub(crate) fn build_pairing_url(
     format!("{}/pair#pairing={}", landing_base, encoded)
 }
 
+pub(crate) fn build_relay_api_url(relay_base_url: &str, path: &str) -> String {
+    let normalized = normalize_relay_base_url(relay_base_url)
+        .unwrap_or_else(|| relay_base_url.trim().to_string());
+    let api_base = if normalized.ends_with("/api") {
+        normalized
+    } else {
+        format!("{}/api", normalized.trim_end_matches('/'))
+    };
+
+    format!(
+        "{}{}",
+        api_base.trim_end_matches('/'),
+        if path.starts_with('/') {
+            path.to_string()
+        } else {
+            format!("/{}", path)
+        }
+    )
+}
+
 fn default_relay_agent_status() -> Result<RelayAgentStatus, String> {
     Ok(RelayAgentStatus {
         running: false,
@@ -473,8 +493,54 @@ pub fn stop_relay_agent() -> Result<RelayAgentStatus, String> {
     stop_relay_agent_internal()
 }
 
+async fn register_pairing_invite(
+    status: &RelayAgentStatus,
+    invite: &RelayPairingInvite,
+) -> Result<(), String> {
+    let endpoint = build_relay_api_url(&invite.relay_base_url, "/pairing/invites");
+    let payload = json!({
+        "inviteId": invite.invite_id,
+        "hostId": invite.host_id,
+        "code": invite.code,
+        "createdAt": Utc::now().to_rfc3339(),
+        "expiresAt": invite.expires_at,
+        "host": {
+            "hostId": invite.host_id,
+            "displayName": status
+                .host_display_name
+                .clone()
+                .unwrap_or_else(default_host_display_name),
+            "status": if status.running { "online" } else { "starting" },
+            "lastSeenAt": Utc::now().to_rfc3339(),
+            "capabilities": ["chat"]
+        }
+    });
+
+    let client = reqwest::Client::new();
+    let response = client
+        .post(endpoint)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| format!("Failed to register pairing invite: {}", error))?;
+
+    if response.status().is_success() {
+        return Ok(());
+    }
+
+    let status_code = response.status();
+    let body = response.text().await.unwrap_or_default();
+    Err(format!(
+        "Failed to register pairing invite: HTTP {} {}",
+        status_code,
+        body.trim()
+    ))
+}
+
 #[tauri::command]
-pub fn create_relay_pairing_invite(ttl_secs: Option<i64>) -> Result<RelayPairingInvite, String> {
+pub async fn create_relay_pairing_invite(
+    ttl_secs: Option<i64>,
+) -> Result<RelayPairingInvite, String> {
     let status = get_relay_agent_status()?;
     let relay_base_url = status
         .relay_base_url
@@ -491,19 +557,23 @@ pub fn create_relay_pairing_invite(ttl_secs: Option<i64>) -> Result<RelayPairing
         .to_rfc3339();
     let pairing_url = build_pairing_url(&relay_base_url, &host_id, &invite_id, &code, &expires_at);
 
-    Ok(RelayPairingInvite {
+    let invite = RelayPairingInvite {
         invite_id,
         host_id,
         relay_base_url,
         code,
         expires_at,
         pairing_url,
-    })
+    };
+
+    register_pairing_invite(&status, &invite).await?;
+
+    Ok(invite)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build_pairing_url, normalize_relay_base_url};
+    use super::{build_pairing_url, build_relay_api_url, normalize_relay_base_url};
 
     #[test]
     fn normalize_relay_base_url_trims_and_removes_trailing_slash() {
@@ -526,5 +596,17 @@ mod tests {
 
         assert!(url.starts_with("https://relay.example.workers.dev/pair#pairing="));
         assert!(url.contains("pairing="));
+    }
+
+    #[test]
+    fn build_relay_api_url_normalizes_api_suffix() {
+        assert_eq!(
+            build_relay_api_url("https://relay.example.workers.dev/api", "/pairing/invites"),
+            "https://relay.example.workers.dev/api/pairing/invites"
+        );
+        assert_eq!(
+            build_relay_api_url("https://relay.example.workers.dev", "hosts/sync"),
+            "https://relay.example.workers.dev/api/hosts/sync"
+        );
     }
 }
