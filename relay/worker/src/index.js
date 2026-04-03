@@ -3,7 +3,9 @@ import {
   createMemoryRelayStorage,
   createPairingInvite,
   claimPairingInvite,
+  listHostSessions,
   listPairedHosts,
+  upsertHostSessions,
   upsertHostMetadata,
 } from "./storage.js";
 
@@ -76,6 +78,29 @@ export default {
       const clientId = parts[3];
       const hosts = await listPairedHosts(storage, { clientId });
       return Response.json({ ok: true, hosts });
+    }
+
+    if (request.method === "POST" && url.pathname === "/api/hosts/sync") {
+      const body = await readJson(request);
+      if (body.host) {
+        await upsertHostMetadata(storage, body.host);
+      }
+      const sessions = await upsertHostSessions(storage, {
+        hostId: body.host?.hostId || body.hostId,
+        sessions: body.sessions,
+      });
+      return Response.json({ ok: true, sessions });
+    }
+
+    if (
+      request.method === "GET" &&
+      url.pathname.startsWith("/api/hosts/") &&
+      url.pathname.endsWith("/sessions")
+    ) {
+      const parts = url.pathname.split("/");
+      const hostId = parts[3];
+      const sessions = await listHostSessions(storage, { hostId });
+      return Response.json({ ok: true, sessions });
     }
 
     return new Response("Not found", { status: 404 });

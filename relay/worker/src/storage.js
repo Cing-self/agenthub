@@ -13,16 +13,22 @@ export function createMemoryRelayStorage() {
   const invites = [];
   const pairings = [];
   const hosts = new Map();
+  const hostSessions = new Map();
 
   return {
     invites,
     pairings,
     hosts,
+    hostSessions,
     debug() {
       return {
         invites: invites.map((invite) => clone(invite)),
         pairings: pairings.map((pairing) => clone(pairing)),
         hosts: Array.from(hosts.values()).map((host) => clone(host)),
+        hostSessions: Array.from(hostSessions.entries()).map(([hostId, sessions]) => ({
+          hostId,
+          sessions: clone(sessions),
+        })),
       };
     },
   };
@@ -92,4 +98,30 @@ export async function listPairedHosts(storage, { clientId }) {
     .map((pairing) => storage.hosts.get(pairing.hostId))
     .filter(Boolean)
     .map((host) => clone(host));
+}
+
+export async function upsertHostSessions(storage, { hostId, sessions }) {
+  const normalizedHostId = requiredString(hostId, "hostId");
+  const normalizedSessions = Array.isArray(sessions)
+    ? sessions.map((session) => ({
+        sessionId: requiredString(session.sessionId, "sessionId"),
+        hostId: requiredString(session.hostId, "session.hostId"),
+        title: String(session.title || "").trim() || "Untitled session",
+        summary: String(session.summary || "").trim(),
+        updatedAt: requiredString(session.updatedAt, "updatedAt"),
+        primaryAgentId:
+          typeof session.primaryAgentId === "string" && session.primaryAgentId.trim().length > 0
+            ? session.primaryAgentId.trim()
+            : null,
+        state: String(session.state || "active").trim() || "active",
+      }))
+    : [];
+
+  storage.hostSessions.set(normalizedHostId, normalizedSessions);
+  return clone(normalizedSessions);
+}
+
+export async function listHostSessions(storage, { hostId }) {
+  const normalizedHostId = requiredString(hostId, "hostId");
+  return clone(storage.hostSessions.get(normalizedHostId) || []);
 }

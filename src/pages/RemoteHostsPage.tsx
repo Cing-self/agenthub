@@ -52,6 +52,31 @@ interface RemoteBridgeLogTail {
   updatedAt: string;
 }
 
+interface RelayAgentStatus {
+  running: boolean;
+  pid: number | null;
+  status: string;
+  relayBaseUrl: string | null;
+  hostId: string | null;
+  hostDisplayName: string | null;
+  sessionCount: number;
+  startedAt: string | null;
+  updatedAt: string | null;
+  lastSyncAt: string | null;
+  connectedAt: string | null;
+  lastError: string | null;
+  logPath: string;
+}
+
+interface RelayPairingInvite {
+  inviteId: string;
+  hostId: string;
+  relayBaseUrl: string;
+  code: string;
+  expiresAt: string;
+  pairingUrl: string;
+}
+
 const CONN_OPTIONS = [
   { value: "ssh", label: "SSH 直连" },
   { value: "docker-local", label: "本地 Docker" },
@@ -64,6 +89,11 @@ const WEB_CHAT_VERSION = "20260403b";
 
 export default function RemoteHostsPage() {
   const [hosts, setHosts] = useState<RemoteHost[]>([]);
+  const [relayStatus, setRelayStatus] = useState<RelayAgentStatus | null>(null);
+  const [relayBusy, setRelayBusy] = useState<"start" | "restart" | "stop" | "pair" | null>(null);
+  const [relayBaseUrlInput, setRelayBaseUrlInput] = useState("");
+  const [pairingInvite, setPairingInvite] = useState<RelayPairingInvite | null>(null);
+  const [relayQrCode, setRelayQrCode] = useState("");
   const [bridgeStatus, setBridgeStatus] = useState<RemoteBridgeStatus | null>(null);
   const [bridgeLog, setBridgeLog] = useState<RemoteBridgeLogTail | null>(null);
   const [bridgeBusy, setBridgeBusy] = useState<"start" | "restart" | "stop" | null>(null);
@@ -83,6 +113,17 @@ export default function RemoteHostsPage() {
     });
   }, []);
 
+  const loadRelayState = async () => {
+    try {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const status = await invoke<RelayAgentStatus>("get_relay_agent_status");
+      setRelayStatus(status);
+      setRelayBaseUrlInput((current) => current || status.relayBaseUrl || "");
+    } catch (error) {
+      console.error("Failed to load relay state:", error);
+    }
+  };
+
   const loadBridgeState = async () => {
     try {
       const { invoke } = await import("@tauri-apps/api/core");
@@ -98,8 +139,17 @@ export default function RemoteHostsPage() {
   };
 
   useEffect(() => {
+    void loadRelayState();
     void loadBridgeState();
   }, []);
+
+  useEffect(() => {
+    if (!relayStatus?.running) return;
+    const timer = window.setInterval(() => {
+      void loadRelayState();
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [relayStatus?.running]);
 
   useEffect(() => {
     if (!bridgeStatus?.running) return;
@@ -142,6 +192,53 @@ export default function RemoteHostsPage() {
   const removeHost = async (id: string) => {
     await saveHosts(hosts.filter(h => h.id !== id));
     toast.success("已删除");
+  };
+
+  const runRelayAction = async (action: "start" | "restart" | "stop") => {
+    try {
+      setRelayBusy(action);
+      const { invoke } = await import("@tauri-apps/api/core");
+      if (action === "stop") {
+        await invoke("stop_relay_agent");
+        setPairingInvite(null);
+        setRelayQrCode("");
+      } else {
+        await invoke("sync_relay_agent", {
+          forceRestart: action === "restart",
+          relayBaseUrl: relayBaseUrlInput,
+        });
+      }
+      await loadRelayState();
+      toast.success(
+        action === "stop"
+          ? "Relay Agent 已停止"
+          : action === "restart"
+            ? "Relay Agent 已重启"
+            : "Relay Agent 已启动",
+      );
+    } catch (error) {
+      console.error("Failed to run relay action:", error);
+      toast.error(`Relay 操作失败: ${error}`);
+    } finally {
+      setRelayBusy(null);
+    }
+  };
+
+  const generatePairingInvite = async () => {
+    try {
+      setRelayBusy("pair");
+      const { invoke } = await import("@tauri-apps/api/core");
+      const invite = await invoke<RelayPairingInvite>("create_relay_pairing_invite", {
+        ttlSecs: 300,
+      });
+      setPairingInvite(invite);
+      toast.success("已生成配对二维码");
+    } catch (error) {
+      console.error("Failed to create pairing invite:", error);
+      toast.error(`生成配对二维码失败: ${error}`);
+    } finally {
+      setRelayBusy(null);
+    }
   };
 
   const runBridgeAction = async (action: "start" | "restart" | "stop") => {
@@ -255,6 +352,39 @@ export default function RemoteHostsPage() {
     primaryBridgeUrl && bridgeStatus?.token
       ? `curl -H "Authorization: Bearer ${bridgeStatus.token}" ${primaryBridgeUrl}/threads`
       : "";
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!pairingInvite?.pairingUrl) {
+      setRelayQrCode("");
+      return;
+    }
+
+    void QRCode.toDataURL(pairingInvite.pairingUrl, {
+      width: 220,
+      margin: 1,
+      color: {
+        dark: "#1f1a16",
+        light: "#0000",
+      },
+    })
+      .then((dataUrl: string) => {
+        if (!cancelled) {
+          setRelayQrCode(dataUrl);
+        }
+      })
+      .catch((error: unknown) => {
+        console.error("Failed to generate relay QR code:", error);
+        if (!cancelled) {
+          setRelayQrCode("");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [pairingInvite?.pairingUrl]);
   const curlTurnCommand =
     primaryBridgeUrl && bridgeStatus?.token
       ? `curl -X POST -H "Authorization: Bearer ${bridgeStatus.token}" -H "Content-Type: application/json" -d '{"message":"你好","agentId":"dolphin"}' ${primaryBridgeUrl}/turn`
@@ -299,6 +429,144 @@ export default function RemoteHostsPage() {
         <h1 className="text-lg font-semibold">远程主机</h1>
         <p className="text-[13px] text-muted-foreground mt-0.5">管理远程服务器、Docker 容器和 Gateway 上的 Agent</p>
       </div>
+
+      <SettingsGroup title="Relay Control Plane">
+        <div className="px-1 py-2 space-y-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span className={cn("w-1.5 h-1.5 rounded-full", relayStatus?.running ? "bg-emerald-500" : "bg-muted-foreground/20")} />
+                <span className="text-[13px] font-medium">Outbound Relay Agent</span>
+                <span className="text-[11px] text-muted-foreground">
+                  {relayStatus?.running ? "运行中" : relayStatus?.status || "未启动"}
+                </span>
+              </div>
+              <p className="text-[12px] text-muted-foreground">
+                这层负责把当前桌面 Host 通过出站连接注册到云端 Relay，后面手机和网页都先连 Relay，再路由回这台机器。
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => void runRelayAction(relayStatus?.running ? "restart" : "start")}
+                disabled={relayBusy !== null}
+                className="text-[12px] px-3 py-1 rounded-lg bg-foreground text-background hover:bg-foreground/90 transition-colors disabled:opacity-60"
+              >
+                {relayBusy === "start" || relayBusy === "restart"
+                  ? "处理中..."
+                  : relayStatus?.running
+                    ? "重启"
+                    : "启动"}
+              </button>
+              <button
+                onClick={() => void runRelayAction("stop")}
+                disabled={!relayStatus?.running || relayBusy !== null}
+                className="text-[12px] px-3 py-1 rounded-lg border border-border text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+              >
+                停止
+              </button>
+            </div>
+          </div>
+
+          <EditableRow
+            label="Relay URL"
+            value={relayBaseUrlInput}
+            mono
+            onSave={(value) => setRelayBaseUrlInput(value)}
+            placeholder="https://your-relay.workers.dev/api"
+          />
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-xl border border-border/70 bg-background/60 px-3 py-3">
+              <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Host ID</div>
+              <div className="mt-1 text-[12px] break-all font-mono text-foreground/90">
+                {relayStatus?.hostId || "启动后生成"}
+              </div>
+              {relayStatus?.hostId && (
+                <button
+                  onClick={() => void copyText("Host ID", relayStatus.hostId!)}
+                  className="mt-2 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  复制 Host ID
+                </button>
+              )}
+            </div>
+            <div className="rounded-xl border border-border/70 bg-background/60 px-3 py-3">
+              <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Sessions</div>
+              <div className="mt-1 text-[12px] text-foreground/90">
+                {relayStatus?.sessionCount ?? 0} 个本地会话
+              </div>
+              <div className="mt-2 text-[11px] text-muted-foreground">
+                {relayStatus?.hostDisplayName || "当前桌面 Host"}
+              </div>
+            </div>
+          </div>
+
+          {(relayStatus?.connectedAt || relayStatus?.lastSyncAt || relayStatus?.lastError) && (
+            <div className="rounded-xl border border-border/60 bg-background/50 px-3 py-3 text-[12px] text-muted-foreground space-y-1">
+              {relayStatus?.connectedAt && <div>连接建立：{new Date(relayStatus.connectedAt).toLocaleString("zh-CN")}</div>}
+              {relayStatus?.lastSyncAt && <div>最近同步：{new Date(relayStatus.lastSyncAt).toLocaleString("zh-CN")}</div>}
+              {relayStatus?.lastError && <div className="text-red-500/90">最近错误：{relayStatus.lastError}</div>}
+            </div>
+          )}
+
+          <div className="rounded-xl border border-border/70 bg-background/60 px-3 py-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="space-y-1">
+                <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">手机配对</div>
+                <p className="text-[12px] text-muted-foreground">
+                  生成一次性的二维码邀请，让 iOS App 直接认领这台 Host，不再手填 Base URL 和长 Token。
+                </p>
+              </div>
+              <button
+                onClick={() => void generatePairingInvite()}
+                disabled={!relayStatus?.running || relayBusy !== null}
+                className="text-[12px] px-3 py-1 rounded-lg border border-border text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+              >
+                {relayBusy === "pair" ? "生成中..." : "生成二维码"}
+              </button>
+            </div>
+
+            {pairingInvite && (
+              <div className="mt-3 flex flex-col gap-3 md:flex-row md:items-center">
+                <div className="shrink-0 rounded-2xl border border-border/70 bg-white p-3 shadow-sm">
+                  {relayQrCode ? (
+                    <img
+                      src={relayQrCode}
+                      alt="Relay 配对二维码"
+                      className="h-[156px] w-[156px] rounded-lg"
+                    />
+                  ) : (
+                    <div className="flex h-[156px] w-[156px] items-center justify-center text-[12px] text-muted-foreground">
+                      生成二维码中...
+                    </div>
+                  )}
+                </div>
+                <div className="min-w-0 flex-1 space-y-2">
+                  <div className="text-[12px] break-all text-foreground/90 font-mono">{pairingInvite.code}</div>
+                  <div className="text-[11px] text-muted-foreground">
+                    过期时间：{new Date(pairingInvite.expiresAt).toLocaleString("zh-CN")}
+                  </div>
+                  <div className="text-[12px] break-all text-muted-foreground">{pairingInvite.pairingUrl}</div>
+                  <div className="flex gap-3">
+                    <button
+                      onClick={() => void copyText("配对链接", pairingInvite.pairingUrl)}
+                      className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      复制配对链接
+                    </button>
+                    <button
+                      onClick={() => void copyText("配对码", pairingInvite.code)}
+                      className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      复制配对码
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </SettingsGroup>
 
       <SettingsGroup title="本机 Bridge">
         <div className="px-1 py-2 space-y-3">

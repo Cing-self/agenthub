@@ -6,6 +6,8 @@ import {
   createPairingInvite,
   claimPairingInvite,
   listPairedHosts,
+  listHostSessions,
+  upsertHostSessions,
   upsertHostMetadata,
 } from "../src/storage.js";
 
@@ -93,4 +95,42 @@ test("listPairedHosts returns paired host metadata for a client", async () => {
   assert.equal(hosts.length, 1);
   assert.equal(hosts[0].hostId, "host_123");
   assert.equal(hosts[0].displayName, "MacBook Pro");
+});
+
+test("upsertHostSessions replaces the current session snapshot for a host", async () => {
+  const storage = createMemoryRelayStorage();
+
+  await upsertHostSessions(storage, {
+    hostId: "host_123",
+    sessions: [
+      {
+        sessionId: "thread_older",
+        hostId: "host_123",
+        title: "Older thread",
+        summary: "older goal",
+        updatedAt: "2026-04-03T11:59:00.000Z",
+        primaryAgentId: "dolphin",
+        state: "active",
+      },
+    ],
+  });
+  await upsertHostSessions(storage, {
+    hostId: "host_123",
+    sessions: [
+      {
+        sessionId: "thread_newer",
+        hostId: "host_123",
+        title: "Newer thread",
+        summary: "newer goal",
+        updatedAt: "2026-04-03T12:01:00.000Z",
+        primaryAgentId: "claude-code",
+        state: "active",
+      },
+    ],
+  });
+
+  const sessions = await listHostSessions(storage, { hostId: "host_123" });
+
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].sessionId, "thread_newer");
 });
