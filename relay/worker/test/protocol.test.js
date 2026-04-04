@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createEnvelope, parseEnvelope } from "../src/protocol.js";
+import {
+  createEnvelope,
+  parseCallSummary,
+  parseEnvelope,
+} from "../src/protocol.js";
 
 test("createEnvelope requires messageId, hostId, and type", () => {
   assert.throws(
@@ -46,5 +50,58 @@ test("parseEnvelope rejects invalid payloads", () => {
         payload: "hello",
       }),
     /payload/i,
+  );
+});
+
+test("parseCallSummary accepts voice call state and mode", () => {
+  const call = parseCallSummary({
+    callId: "call_123",
+    hostId: "host_123",
+    sessionId: "session_123",
+    clientId: "client_ios",
+    mode: "audio",
+    state: "connecting",
+    createdAt: "2026-04-04T01:00:00.000Z",
+    updatedAt: "2026-04-04T01:00:01.000Z",
+    mediaConfig: {
+      voice: {
+        providerId: "volcengine",
+        modelId: "doubao-realtime-asr",
+      },
+      video: {
+        providerId: "googleapis",
+        modelId: "gemini-2.5-flash",
+      },
+    },
+  });
+
+  assert.equal(call.callId, "call_123");
+  assert.equal(call.mode, "audio");
+  assert.equal(call.state, "connecting");
+  assert.deepEqual(call.mediaConfig, {
+    voice: {
+      providerId: "volcengine",
+      modelId: "doubao-realtime-asr",
+    },
+    video: {
+      providerId: "googleapis",
+      modelId: "gemini-2.5-flash",
+    },
+  });
+});
+
+test("parseCallSummary rejects unsupported call state", () => {
+  assert.throws(
+    () =>
+      parseCallSummary({
+        callId: "call_123",
+        hostId: "host_123",
+        clientId: "client_ios",
+        mode: "audio",
+        state: "processing",
+        createdAt: "2026-04-04T01:00:00.000Z",
+        updatedAt: "2026-04-04T01:00:01.000Z",
+      }),
+    /state/i,
   );
 });

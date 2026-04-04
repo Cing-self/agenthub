@@ -9,6 +9,14 @@ function requiredString(value, fieldName) {
   return value.trim();
 }
 
+function optionalString(value) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 function normalizeCapabilities(value) {
   if (!Array.isArray(value)) return [];
   return value
@@ -17,8 +25,70 @@ function normalizeCapabilities(value) {
     .filter(Boolean);
 }
 
-export function buildHostRegistrationPayload(input) {
+function normalizeModelSelection(value, fieldName) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`${fieldName} must be an object`);
+  }
+
   return {
+    providerId: requiredString(value.providerId, `${fieldName}.providerId`),
+    modelId: requiredString(value.modelId, `${fieldName}.modelId`),
+  };
+}
+
+function normalizeMediaConfig(value, fieldName) {
+  if (value == null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`${fieldName} must be an object`);
+  }
+
+  const voice = value.voice == null ? null : normalizeModelSelection(value.voice, `${fieldName}.voice`);
+  const video = value.video == null ? null : normalizeModelSelection(value.video, `${fieldName}.video`);
+  if (!voice && !video) {
+    return null;
+  }
+  return { voice, video };
+}
+
+function normalizeConfiguredModelSelection(value, providerFieldName, modelFieldName) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const providerId = optionalString(value.providerId) ?? optionalString(value[providerFieldName]);
+  const modelId = optionalString(value.modelId) ?? optionalString(value[modelFieldName]);
+  if (!providerId || !modelId) {
+    return null;
+  }
+
+  return { providerId, modelId };
+}
+
+export function extractRelayMediaDefaults(hub) {
+  if (!hub || typeof hub !== "object" || Array.isArray(hub)) {
+    return null;
+  }
+
+  const media = hub.media;
+  if (!media || typeof media !== "object" || Array.isArray(media)) {
+    return null;
+  }
+
+  return normalizeMediaConfig(
+    {
+      voice: normalizeConfiguredModelSelection(media.voice, "asrProviderId", "asrModelId"),
+      video: normalizeConfiguredModelSelection(
+        media.video,
+        "reasoningProviderId",
+        "reasoningModelId",
+      ),
+    },
+    "hub.media",
+  );
+}
+
+export function buildHostRegistrationPayload(input) {
+  const payload = {
     hostId: requiredString(input.hostId, "hostId"),
     displayName: requiredString(input.displayName, "displayName"),
     platform: requiredString(input.platform, "platform"),
@@ -30,6 +100,13 @@ export function buildHostRegistrationPayload(input) {
         : new Date().toISOString(),
     capabilities: normalizeCapabilities(input.capabilities),
   };
+
+  const mediaDefaults = normalizeMediaConfig(input.mediaDefaults, "mediaDefaults");
+  if (mediaDefaults) {
+    payload.mediaDefaults = mediaDefaults;
+  }
+
+  return payload;
 }
 
 export function buildRelayApiUrl(relayBaseUrl, pathName) {
@@ -105,6 +182,9 @@ const projectRoot =
 const statePath =
   process.env.AGENTHUB_RELAY_AGENT_STATE_PATH ||
   path.join(os.homedir(), ".agenthub", "runtime", "relay-agent.json");
+const remoteBridgeStatePath =
+  process.env.AGENTHUB_REMOTE_BRIDGE_STATE_PATH ||
+  path.join(os.homedir(), ".agenthub", "runtime", "remote-bridge.json");
 const logPath = process.env.AGENTHUB_RELAY_AGENT_LOG_PATH || "";
 const relayBaseUrl = process.env.AGENTHUB_RELAY_BASE_URL || "";
 const hostId =
@@ -112,6 +192,80 @@ const hostId =
 const hostDisplayName =
   process.env.AGENTHUB_RELAY_HOST_DISPLAY_NAME || os.hostname();
 const runtimeVersion = "0.1.0";
+
+async function readJsonResponse(response) {
+  const text = await response.text();
+  let payload = {};
+
+  if (text.trim().length > 0) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      throw new Error(`invalid_json_response:${text.trim().slice(0, 200)}`);
+    }
+  }
+
+  if (!response.ok) {
+    throw new Error(String(payload?.error || payload?.message || `HTTP ${response.status}`));
+  }
+
+  return payload;
+}
+
+function isRetryableRelayError(error) {
+  const code = String(error?.code || error?.cause?.code || "").toUpperCase();
+  if (["ECONNRESET", "ETIMEDOUT", "EPIPE", "UND_ERR_CONNECT_TIMEOUT"].includes(code)) {
+    return true;
+  }
+
+  const message = String(error?.message || "").toLowerCase();
+  return message.includes("fetch failed") || message.includes("network socket disconnected");
+}
+
+async function sleep(delayMs) {
+  await new Promise((resolve) => {
+    setTimeout(resolve, delayMs);
+  });
+}
+
+export function createSerializedRunner(task) {
+  let running = false;
+
+  return async () => {
+    if (running) {
+      return false;
+    }
+
+    running = true;
+    try {
+      await task();
+      return true;
+    } finally {
+      running = false;
+    }
+  };
+}
+
+export async function fetchRelayJson(fetchImpl, url, options, config = {}) {
+  const retries = Number.isInteger(config.retries) ? config.retries : 2;
+  const retryDelayMs = Number.isInteger(config.retryDelayMs) ? config.retryDelayMs : 250;
+  const sleepImpl = typeof config.sleep === "function" ? config.sleep : sleep;
+
+  let attempt = 0;
+  while (true) {
+    try {
+      const response = await fetchImpl(url, options);
+      return await readJsonResponse(response);
+    } catch (error) {
+      if (attempt >= retries || !isRetryableRelayError(error)) {
+        throw error;
+      }
+
+      attempt += 1;
+      await sleepImpl(retryDelayMs * attempt);
+    }
+  }
+}
 
 async function readHubConfig() {
   const hubPath = path.join(os.homedir(), ".agenthub", "hub.json");
@@ -125,6 +279,155 @@ async function readHubConfig() {
       },
     };
   }
+}
+
+export async function readRemoteBridgeState(pathName = remoteBridgeStatePath) {
+  const raw = await fs.readFile(pathName, "utf8");
+  return JSON.parse(raw);
+}
+
+export function buildLocalBridgeTurnRequest({ bridge, turn }) {
+  const port = Number(bridge?.port);
+  if (!Number.isFinite(port) || port <= 0) {
+    throw new TypeError("bridge.port is required");
+  }
+  const token = requiredString(bridge?.token, "bridge.token");
+  const sessionId = requiredString(turn?.sessionId, "turn.sessionId");
+  const message = requiredString(turn?.message, "turn.message");
+
+  return {
+    url: `http://127.0.0.1:${port}/turn`,
+    options: {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        threadId: sessionId,
+        message,
+      }),
+    },
+  };
+}
+
+export function buildRelayTurnCompletionRequest({
+  relayBaseUrl,
+  hostId,
+  turnId,
+  completedAt,
+  result = null,
+  error = null,
+}) {
+  const normalizedHostId = requiredString(hostId, "hostId");
+  const normalizedTurnId = requiredString(turnId, "turnId");
+  const normalizedCompletedAt = requiredString(completedAt, "completedAt");
+
+  return {
+    url: buildRelayApiUrl(
+      relayBaseUrl,
+      `/hosts/${encodeURIComponent(normalizedHostId)}/turns/${encodeURIComponent(normalizedTurnId)}/complete`,
+    ),
+    body: {
+      completedAt: normalizedCompletedAt,
+      runtimeSessionId:
+        typeof result?.runtimeSessionId === "string" ? result.runtimeSessionId : null,
+      agentId: typeof result?.agentId === "string" ? result.agentId : null,
+      userMessage:
+        result?.userMessage && typeof result.userMessage === "object" ? result.userMessage : null,
+      assistantMessage:
+        result?.assistantMessage && typeof result.assistantMessage === "object"
+          ? result.assistantMessage
+          : null,
+      error:
+        error == null
+          ? null
+          : String(error?.message || error).trim() || "relay_turn_failed",
+    },
+  };
+}
+
+export async function processPendingRelayTurn({
+  relayBaseUrl,
+  hostId,
+  fetchImpl = fetch,
+  now = () => new Date().toISOString(),
+  sleep: sleepImpl = sleep,
+  readRemoteBridgeState: readRemoteBridgeStateImpl = readRemoteBridgeState,
+  executeTurn = null,
+}) {
+  const claimPayload = await fetchRelayJson(
+    fetchImpl,
+    buildRelayApiUrl(relayBaseUrl, `/hosts/${encodeURIComponent(requiredString(hostId, "hostId"))}/turns/claim`),
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        claimedAt: now(),
+      }),
+    },
+    { sleep: sleepImpl },
+  );
+  const turn = claimPayload?.turn || null;
+
+  if (!turn) {
+    return null;
+  }
+
+  let completionRequest;
+
+  try {
+    const bridgePayload =
+      typeof executeTurn === "function"
+        ? await executeTurn(turn)
+        : await (async () => {
+            const bridgeState = await readRemoteBridgeStateImpl();
+            if (!bridgeState?.running) {
+              throw new Error("local_bridge_unavailable");
+            }
+
+            const bridgeRequest = buildLocalBridgeTurnRequest({
+              bridge: bridgeState,
+              turn,
+            });
+            const bridgeResponse = await fetchImpl(bridgeRequest.url, bridgeRequest.options);
+            return readJsonResponse(bridgeResponse);
+          })();
+
+    completionRequest = buildRelayTurnCompletionRequest({
+      relayBaseUrl,
+      hostId,
+      turnId: turn.turnId,
+      completedAt: now(),
+      result: bridgePayload,
+    });
+  } catch (error) {
+    completionRequest = buildRelayTurnCompletionRequest({
+      relayBaseUrl,
+      hostId,
+      turnId: turn.turnId,
+      completedAt: now(),
+      error,
+    });
+  }
+
+  return fetchRelayJson(
+    fetchImpl,
+    completionRequest.url,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(completionRequest.body),
+    },
+    { sleep: sleepImpl },
+  );
 }
 
 async function writeState(partial = {}, snapshot = null) {
@@ -183,19 +486,18 @@ export async function runRelayAgent() {
         },
         snapshot,
       });
-      const response = await fetch(request.url, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          accept: "application/json",
+      await fetchRelayJson(
+        fetch,
+        request.url,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json",
+          },
+          body: JSON.stringify(request.body),
         },
-        body: JSON.stringify(request.body),
-      });
-
-      if (!response.ok) {
-        const body = await response.text();
-        throw new Error(`relay sync failed: HTTP ${response.status} ${body.trim()}`);
-      }
+      );
     }
 
     await writeState({
@@ -207,8 +509,28 @@ export async function runRelayAgent() {
 
   await syncOnce();
 
+  const runTurnPoll = createSerializedRunner(async () => {
+    await processPendingRelayTurn({
+      relayBaseUrl,
+      hostId,
+    });
+  });
+
+  const turnTimer = setInterval(() => {
+    void runTurnPoll().catch(async (error) => {
+      console.error("[relay-agent] failed to process turn", error);
+      await writeState({
+        lastError: String(error?.message || error),
+      }).catch(() => {});
+    });
+  }, 2000);
+
+  const runSyncPoll = createSerializedRunner(async () => {
+    await syncOnce();
+  });
+
   const timer = setInterval(() => {
-    void syncOnce().catch(async (error) => {
+    void runSyncPoll().catch(async (error) => {
       console.error("[relay-agent] failed to sync", error);
       await writeState({
         lastError: String(error?.message || error),
@@ -218,6 +540,7 @@ export async function runRelayAgent() {
 
   const shutdown = async () => {
     clearInterval(timer);
+    clearInterval(turnTimer);
     await markStopped().catch(() => {});
     process.exit(0);
   };

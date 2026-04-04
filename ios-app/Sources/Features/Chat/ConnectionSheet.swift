@@ -21,6 +21,7 @@ struct ConnectionSheet: View {
                     PairingEntryCard(
                         pairingInput: $pairingInput,
                         isConnecting: store.connectionState == .connecting,
+                        stage: store.connectionStage,
                         onConnect: connectPairing
                     )
 
@@ -55,14 +56,7 @@ struct ConnectionSheet: View {
     }
 
     private var sheetBackground: LinearGradient {
-        LinearGradient(
-            colors: [
-                Color(red: 0.97, green: 0.98, blue: 0.97),
-                Color(red: 0.93, green: 0.95, blue: 0.93),
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
+        ChatChromePresentation.backgroundGradient
     }
 
     private func connectPairing() {
@@ -92,13 +86,13 @@ private struct PairingHeroCard: View {
                 .font(.system(size: 26, weight: .bold))
                 .foregroundStyle(.primary)
 
-            Text("Paste the pairing link from AgentHub desktop. This keeps relay onboarding as the default path, then layers voice, notifications, and remote control on top.")
+            Text("Scan the desktop QR code to open and connect instantly, or paste the pairing link manually. This keeps relay onboarding as the default path, then layers voice, notifications, and remote control on top.")
                 .font(.system(size: 15))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(ChatChromePresentation.secondaryTextColor)
         }
         .padding(22)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.white.opacity(0.86), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .background(ChatChromePresentation.surfaceColor, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
     }
 }
 
@@ -118,18 +112,19 @@ private struct ConnectionIssueCard: View {
                     .font(.system(size: 17, weight: .semibold))
                 Text(message)
                     .font(.system(size: 14))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(ChatChromePresentation.secondaryTextColor)
             }
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.white.opacity(0.86), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .background(ChatChromePresentation.surfaceColor, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
     }
 }
 
 private struct PairingEntryCard: View {
     @Binding var pairingInput: String
     let isConnecting: Bool
+    let stage: ConnectionProgressStage?
     let onConnect: () -> Void
 
     var body: some View {
@@ -137,13 +132,27 @@ private struct PairingEntryCard: View {
             Text("Pair with desktop")
                 .font(.system(size: 18, weight: .semibold))
 
+            Text("Scan the QR code from AgentHub desktop, or paste the pairing link here.")
+                .font(.system(size: 13))
+                .foregroundStyle(ChatChromePresentation.secondaryTextColor)
+
             TextField("Paste pairing link", text: $pairingInput, axis: .vertical)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .lineLimit(3 ... 6)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 14)
-                .background(Color.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .background(ChatChromePresentation.inputFillColor, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(ChatChromePresentation.inputStrokeColor, lineWidth: 1)
+                }
+
+            if isConnecting, let stage {
+                Text(stage.detail)
+                    .font(.system(size: 12))
+                    .foregroundStyle(ChatChromePresentation.secondaryTextColor)
+            }
 
             Button(action: onConnect) {
                 HStack {
@@ -163,7 +172,7 @@ private struct PairingEntryCard: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.white.opacity(0.86), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .background(ChatChromePresentation.surfaceColor, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
     }
 }
 
@@ -182,7 +191,7 @@ private struct DirectBridgeCard: View {
                         .font(.system(size: 18, weight: .semibold))
                     Text("Keep direct bridge for local debugging while relay text turn is still landing.")
                         .font(.system(size: 14))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(ChatChromePresentation.secondaryTextColor)
                 }
 
                 Spacer()
@@ -204,15 +213,23 @@ private struct DirectBridgeCard: View {
                         .textContentType(.URL)
                         .keyboardType(.URL)
                         .padding(.horizontal, 16)
-                        .padding(.vertical, 14)
-                        .background(Color.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .padding(.vertical, 14)
+                    .background(ChatChromePresentation.inputFillColor, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(ChatChromePresentation.inputStrokeColor, lineWidth: 1)
+                    }
 
                     SecureField("Token", text: $token)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .padding(.horizontal, 16)
                         .padding(.vertical, 14)
-                        .background(Color.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .background(ChatChromePresentation.inputFillColor, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .stroke(ChatChromePresentation.inputStrokeColor, lineWidth: 1)
+                        }
 
                     HStack {
                         Button("Use default Cloudflare entry", action: onUseDefault)
@@ -236,7 +253,7 @@ private struct DirectBridgeCard: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.white.opacity(0.86), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .background(ChatChromePresentation.surfaceColor, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
     }
 }
 
@@ -248,10 +265,10 @@ private struct ConnectionNotesCard: View {
 
             Text("This app talks to the remote control contract directly. Pairing gets you hosts and sessions first. Voice, approvals, and media will ride on the same connection model later.")
                 .font(.system(size: 14))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(ChatChromePresentation.secondaryTextColor)
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .background(ChatChromePresentation.surfaceColor, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
     }
 }

@@ -41,7 +41,7 @@ struct RelayPairingPayload: Codable, Equatable {
         }
 
         let fragment = components.fragment ?? ""
-        let pairingValue = fragment
+        let fragmentPairingValue = fragment
             .split(separator: "&")
             .compactMap { item -> String? in
                 let parts = item.split(separator: "=", maxSplits: 1).map(String.init)
@@ -51,6 +51,10 @@ struct RelayPairingPayload: Codable, Equatable {
                 return parts[1]
             }
             .first
+        let queryPairingValue = components.queryItems?
+            .first(where: { $0.name == "pairing" })?
+            .value
+        let pairingValue = queryPairingValue ?? fragmentPairingValue
 
         guard let pairingValue, !pairingValue.isEmpty else {
             throw RelayPairingPayloadError.missingPayload
@@ -73,9 +77,105 @@ struct RelayHost: Codable, Equatable, Hashable, Identifiable {
     let status: String
     let lastSeenAt: String
     let capabilities: [String]
+    let mediaDefaults: RelayMediaConfig?
+    let activeCall: RelayCallSummary?
+
+    init(
+        hostId: String,
+        displayName: String,
+        status: String,
+        lastSeenAt: String,
+        capabilities: [String],
+        mediaDefaults: RelayMediaConfig? = nil,
+        activeCall: RelayCallSummary? = nil
+    ) {
+        self.hostId = hostId
+        self.displayName = displayName
+        self.status = status
+        self.lastSeenAt = lastSeenAt
+        self.capabilities = capabilities
+        self.mediaDefaults = mediaDefaults
+        self.activeCall = activeCall
+    }
 
     var id: String {
         hostId
+    }
+}
+
+enum RelayCallMode: String, Codable, Equatable, Hashable {
+    case audio
+    case video
+    case cameraShare = "camera-share"
+}
+
+enum RelayCallState: String, Codable, Equatable, Hashable {
+    case idle
+    case dialing
+    case ringing
+    case connecting
+    case live
+    case ended
+    case failed
+}
+
+struct RelayModelSelection: Codable, Equatable, Hashable {
+    let providerId: String
+    let modelId: String
+}
+
+struct RelayMediaConfig: Codable, Equatable, Hashable {
+    let voice: RelayModelSelection?
+    let video: RelayModelSelection?
+
+    func merging(with fallback: RelayMediaConfig?) -> RelayMediaConfig? {
+        let merged = RelayMediaConfig(
+            voice: voice ?? fallback?.voice,
+            video: video ?? fallback?.video
+        )
+        return merged.voice == nil && merged.video == nil ? nil : merged
+    }
+}
+
+struct RelayCallSummary: Codable, Equatable, Hashable, Identifiable {
+    let callId: String
+    let hostId: String
+    let sessionId: String?
+    let clientId: String
+    let mode: RelayCallMode
+    let state: RelayCallState
+    let createdAt: String
+    let updatedAt: String
+    let mediaConfig: RelayMediaConfig?
+
+    init(
+        callId: String,
+        hostId: String,
+        sessionId: String?,
+        clientId: String,
+        mode: RelayCallMode,
+        state: RelayCallState,
+        createdAt: String,
+        updatedAt: String,
+        mediaConfig: RelayMediaConfig? = nil
+    ) {
+        self.callId = callId
+        self.hostId = hostId
+        self.sessionId = sessionId
+        self.clientId = clientId
+        self.mode = mode
+        self.state = state
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.mediaConfig = mediaConfig
+    }
+
+    var id: String {
+        callId
+    }
+
+    func effectiveMediaConfig(defaults: RelayMediaConfig?) -> RelayMediaConfig? {
+        mediaConfig?.merging(with: defaults) ?? defaults
     }
 }
 
@@ -180,6 +280,109 @@ struct RelayWorkspaceState: Codable, Equatable {
             return
         }
         selectedSessionId = sessionId
+    }
+
+    mutating func applyActiveCall(_ call: RelayCallSummary?) {
+        guard let targetHostId = call?.hostId ?? selectedHostId else {
+            return
+        }
+
+        hosts = hosts.map { host in
+            guard host.hostId == targetHostId else {
+                return host
+            }
+
+            let nextActiveCall: RelayCallSummary?
+            if let call, call.state != .ended, call.state != .failed {
+                nextActiveCall = call
+            } else {
+                nextActiveCall = nil
+            }
+
+            return RelayHost(
+                hostId: host.hostId,
+                displayName: host.displayName,
+                status: host.status,
+                lastSeenAt: host.lastSeenAt,
+                capabilities: host.capabilities,
+                activeCall: nextActiveCall
+            )
+        }
+    }
+}
+
+struct RelayTurn: Codable, Equatable {
+    let turnId: String
+    let hostId: String
+    let clientId: String
+    let sessionId: String
+    let message: String
+    let status: String
+    let createdAt: String
+    let claimedAt: String?
+    let completedAt: String?
+    let runtimeSessionId: String?
+    let agentId: String?
+    let userMessage: BridgeMessage?
+    let assistantMessage: BridgeMessage?
+    let error: String?
+
+    var isTerminal: Bool {
+        status == "completed" || status == "failed"
+    }
+}
+
+struct RelayTurnEnvelopeResponse: Decodable {
+    let ok: Bool
+    let turn: RelayTurn
+}
+
+struct RelayCallEnvelopeResponse: Decodable {
+    let ok: Bool
+    let call: RelayCallSummary?
+}
+
+func mergeRelayMessages(existing: [BridgeMessage], turn: RelayTurn) -> [BridgeMessage] {
+    var ordered: [BridgeMessage] = []
+    var indexByID: [String: Int] = [:]
+
+    func upsert(_ message: BridgeMessage) {
+        if let index = indexByID[message.id] {
+            ordered[index] = message
+            return
+        }
+
+        indexByID[message.id] = ordered.count
+        ordered.append(message)
+    }
+
+    existing.forEach(upsert)
+
+    if let userMessage = turn.userMessage {
+        upsert(userMessage)
+    }
+
+    if let assistantMessage = turn.assistantMessage {
+        upsert(assistantMessage)
+    }
+
+    return ordered.sorted { lhs, rhs in
+        let leftTimestamp = lhs.timestamp ?? ""
+        let rightTimestamp = rhs.timestamp ?? ""
+
+        if leftTimestamp == rightTimestamp {
+            return lhs.id < rhs.id
+        }
+
+        if leftTimestamp.isEmpty {
+            return false
+        }
+
+        if rightTimestamp.isEmpty {
+            return true
+        }
+
+        return leftTimestamp < rightTimestamp
     }
 }
 

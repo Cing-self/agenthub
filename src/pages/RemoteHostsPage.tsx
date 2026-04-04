@@ -65,7 +65,31 @@ interface RelayAgentStatus {
   lastSyncAt: string | null;
   connectedAt: string | null;
   lastError: string | null;
+  mediaDefaults: RelayMediaConfig | null;
+  activeCall: RelayActiveCallSummary | null;
   logPath: string;
+}
+
+interface RelayModelSelection {
+  providerId: string;
+  modelId: string;
+}
+
+interface RelayMediaConfig {
+  voice?: RelayModelSelection | null;
+  video?: RelayModelSelection | null;
+}
+
+interface RelayActiveCallSummary {
+  callId: string;
+  hostId: string;
+  clientId: string;
+  sessionId: string | null;
+  mode: "audio" | "video" | "camera-share";
+  state: "idle" | "dialing" | "ringing" | "connecting" | "live" | "ended" | "failed";
+  createdAt: string;
+  updatedAt: string;
+  mediaConfig: RelayMediaConfig | null;
 }
 
 interface RelayPairingInvite {
@@ -75,6 +99,7 @@ interface RelayPairingInvite {
   code: string;
   expiresAt: string;
   pairingUrl: string;
+  pairingAppUrl: string;
 }
 
 const CONN_OPTIONS = [
@@ -86,6 +111,45 @@ const CONN_OPTIONS = [
 
 const HOSTS_PATH = "/Users/dolphin/.agenthub/remote-hosts.json";
 const WEB_CHAT_VERSION = "20260403b";
+
+const RELAY_CALL_MODE_LABELS: Record<RelayActiveCallSummary["mode"], string> = {
+  audio: "语音通话",
+  video: "视频通话",
+  "camera-share": "相机共享",
+};
+
+const RELAY_CALL_STATE_LABELS: Record<RelayActiveCallSummary["state"], string> = {
+  idle: "空闲",
+  dialing: "呼叫中",
+  ringing: "振铃中",
+  connecting: "连接中",
+  live: "通话进行中",
+  ended: "已结束",
+  failed: "已失败",
+};
+
+function formatRelayModelTarget(target?: RelayModelSelection | null) {
+  if (!target) {
+    return null;
+  }
+  return `${target.providerId} / ${target.modelId}`;
+}
+
+function mergeRelayMediaConfig(
+  primary?: RelayMediaConfig | null,
+  fallback?: RelayMediaConfig | null,
+): RelayMediaConfig | null {
+  const voice = primary?.voice ?? fallback?.voice ?? null;
+  const video = primary?.video ?? fallback?.video ?? null;
+  if (!voice && !video) {
+    return null;
+  }
+  return { voice, video };
+}
+
+function hasRelayMediaConfig(config?: RelayMediaConfig | null) {
+  return Boolean(config?.voice || config?.video);
+}
 
 export default function RemoteHostsPage() {
   const [hosts, setHosts] = useState<RemoteHost[]>([]);
@@ -103,6 +167,9 @@ export default function RemoteHostsPage() {
   const [scanning, setScanning] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [chatQrCode, setChatQrCode] = useState<string>("");
+  const hostMediaDefaults = relayStatus?.mediaDefaults ?? null;
+  const activeCallMedia = mergeRelayMediaConfig(relayStatus?.activeCall?.mediaConfig, hostMediaDefaults);
+  const activeCallHasOverride = hasRelayMediaConfig(relayStatus?.activeCall?.mediaConfig);
 
   useEffect(() => {
     import("@tauri-apps/api/core").then(async ({ invoke }) => {
@@ -211,10 +278,10 @@ export default function RemoteHostsPage() {
       await loadRelayState();
       toast.success(
         action === "stop"
-          ? "Relay Agent 已停止"
+          ? "Remote Mode 已停止"
           : action === "restart"
-            ? "Relay Agent 已重启"
-            : "Relay Agent 已启动",
+            ? "Remote Mode 已重启"
+            : "Remote Mode 已启动",
       );
     } catch (error) {
       console.error("Failed to run relay action:", error);
@@ -253,14 +320,14 @@ export default function RemoteHostsPage() {
       await loadBridgeState();
       toast.success(
         action === "stop"
-          ? "本机 Bridge 已停止"
+          ? "本地调试入口已停止"
           : action === "restart"
-            ? "本机 Bridge 已重启"
-            : "本机 Bridge 已启动",
+            ? "本地调试入口已重启"
+            : "本地调试入口已启动",
       );
     } catch (error) {
       console.error("Failed to run remote bridge action:", error);
-      toast.error(`Bridge 操作失败: ${error}`);
+      toast.error(`本地调试入口操作失败: ${error}`);
     } finally {
       setBridgeBusy(null);
     }
@@ -355,13 +422,14 @@ export default function RemoteHostsPage() {
 
   useEffect(() => {
     let cancelled = false;
+    const qrValue = pairingInvite?.pairingAppUrl || pairingInvite?.pairingUrl;
 
-    if (!pairingInvite?.pairingUrl) {
+    if (!qrValue) {
       setRelayQrCode("");
       return;
     }
 
-    void QRCode.toDataURL(pairingInvite.pairingUrl, {
+    void QRCode.toDataURL(qrValue, {
       width: 220,
       margin: 1,
       color: {
@@ -384,7 +452,7 @@ export default function RemoteHostsPage() {
     return () => {
       cancelled = true;
     };
-  }, [pairingInvite?.pairingUrl]);
+  }, [pairingInvite?.pairingAppUrl, pairingInvite?.pairingUrl]);
   const curlTurnCommand =
     primaryBridgeUrl && bridgeStatus?.token
       ? `curl -X POST -H "Authorization: Bearer ${bridgeStatus.token}" -H "Content-Type: application/json" -d '{"message":"你好","agentId":"dolphin"}' ${primaryBridgeUrl}/turn`
@@ -430,19 +498,19 @@ export default function RemoteHostsPage() {
         <p className="text-[13px] text-muted-foreground mt-0.5">管理远程服务器、Docker 容器和 Gateway 上的 Agent</p>
       </div>
 
-      <SettingsGroup title="Relay Control Plane">
+      <SettingsGroup title="Remote Mode">
         <div className="px-1 py-2 space-y-3">
           <div className="flex items-start justify-between gap-3">
             <div className="space-y-1">
               <div className="flex items-center gap-2">
                 <span className={cn("w-1.5 h-1.5 rounded-full", relayStatus?.running ? "bg-emerald-500" : "bg-muted-foreground/20")} />
-                <span className="text-[13px] font-medium">Outbound Relay Agent</span>
+                <span className="text-[13px] font-medium">Cloud Relay Gateway</span>
                 <span className="text-[11px] text-muted-foreground">
                   {relayStatus?.running ? "运行中" : relayStatus?.status || "未启动"}
                 </span>
               </div>
               <p className="text-[12px] text-muted-foreground">
-                这层负责把当前桌面 Host 通过出站连接注册到云端 Relay，后面手机和网页都先连 Relay，再路由回这台机器。
+                这就是手机和后续语音视频入口会复用的主远程模式。本地 Gateway 通过出站连接注册到云端 Relay，客户端先连云端，再路由回这台机器。
               </p>
             </div>
             <div className="flex items-center gap-2">
@@ -501,6 +569,52 @@ export default function RemoteHostsPage() {
             </div>
           </div>
 
+          {hasRelayMediaConfig(hostMediaDefaults) && (
+            <div className="rounded-xl border border-border/60 bg-background/50 px-3 py-3">
+              <div className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">Media Defaults</div>
+              <div className="mt-2 space-y-1 text-[12px] text-muted-foreground">
+                {hostMediaDefaults?.voice && (
+                  <div>语音模型：{formatRelayModelTarget(hostMediaDefaults.voice)}</div>
+                )}
+                {hostMediaDefaults?.video && (
+                  <div>视频模型：{formatRelayModelTarget(hostMediaDefaults.video)}</div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {relayStatus?.activeCall && (
+            <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-3 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-emerald-600/90">
+                    Active Call
+                  </div>
+                  <div className="mt-1 text-[13px] font-medium text-foreground">
+                    {RELAY_CALL_MODE_LABELS[relayStatus.activeCall.mode]} · {RELAY_CALL_STATE_LABELS[relayStatus.activeCall.state]}
+                  </div>
+                </div>
+                <div className="rounded-full bg-emerald-500/10 px-2.5 py-1 text-[11px] text-emerald-700">
+                  {relayStatus.activeCall.sessionId ? "已绑定会话" : "等待会话"}
+                </div>
+              </div>
+              <div className="mt-3 space-y-1 text-[12px] text-muted-foreground">
+                {relayStatus.activeCall.sessionId && <div>会话：{relayStatus.activeCall.sessionId}</div>}
+                <div>客户端：{relayStatus.activeCall.clientId}</div>
+                {activeCallMedia?.voice && (
+                  <div>当前语音模型：{formatRelayModelTarget(activeCallMedia.voice)}</div>
+                )}
+                {activeCallMedia?.video && (
+                  <div>当前视频模型：{formatRelayModelTarget(activeCallMedia.video)}</div>
+                )}
+                {activeCallHasOverride && (
+                  <div className="text-emerald-700/90">本次通话覆盖了 Host 默认媒体配置</div>
+                )}
+                <div>最近状态更新时间：{new Date(relayStatus.activeCall.updatedAt).toLocaleString("zh-CN")}</div>
+              </div>
+            </div>
+          )}
+
           {(relayStatus?.connectedAt || relayStatus?.lastSyncAt || relayStatus?.lastError) && (
             <div className="rounded-xl border border-border/60 bg-background/50 px-3 py-3 text-[12px] text-muted-foreground space-y-1">
               {relayStatus?.connectedAt && <div>连接建立：{new Date(relayStatus.connectedAt).toLocaleString("zh-CN")}</div>}
@@ -546,10 +660,13 @@ export default function RemoteHostsPage() {
                   <div className="text-[11px] text-muted-foreground">
                     过期时间：{new Date(pairingInvite.expiresAt).toLocaleString("zh-CN")}
                   </div>
-                  <div className="text-[12px] break-all text-muted-foreground">{pairingInvite.pairingUrl}</div>
+                  <div className="text-[11px] text-foreground/70">
+                    手机扫码会直接打开 LobsterMobile 并开始配对。
+                  </div>
+                  <div className="text-[12px] break-all text-muted-foreground">{pairingInvite.pairingAppUrl}</div>
                   <div className="flex gap-3">
                     <button
-                      onClick={() => void copyText("配对链接", pairingInvite.pairingUrl)}
+                      onClick={() => void copyText("配对链接", pairingInvite.pairingAppUrl)}
                       className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
                     >
                       复制配对链接
@@ -568,19 +685,19 @@ export default function RemoteHostsPage() {
         </div>
       </SettingsGroup>
 
-      <SettingsGroup title="本机 Bridge">
+      <SettingsGroup title="Advanced / Local Debug">
         <div className="px-1 py-2 space-y-3">
           <div className="flex items-start justify-between gap-3">
             <div className="space-y-1">
               <div className="flex items-center gap-2">
                 <span className={cn("w-1.5 h-1.5 rounded-full", bridgeStatus?.running ? "bg-emerald-500" : "bg-muted-foreground/20")} />
-                <span className="text-[13px] font-medium">Remote Control Bridge</span>
+                <span className="text-[13px] font-medium">Direct Local Bridge</span>
                 <span className="text-[11px] text-muted-foreground">
                   {bridgeStatus?.running ? "运行中" : bridgeStatus?.status || "未启动"}
                 </span>
               </div>
               <p className="text-[12px] text-muted-foreground">
-                把当前这台 Mac 暴露成一个可远程控制的本地 Agent 入口，后面手机和语音入口都可以复用这一层。
+                这套是本机或局域网调试入口，主要给开发排查和直连自测用，不是默认的移动端接入方式。
               </p>
             </div>
             <div className="flex items-center gap-2">

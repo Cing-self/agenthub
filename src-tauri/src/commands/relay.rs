@@ -4,8 +4,38 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayModelSelection {
+    pub provider_id: String,
+    pub model_id: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayMediaConfig {
+    #[serde(default)]
+    pub voice: Option<RelayModelSelection>,
+    #[serde(default)]
+    pub video: Option<RelayModelSelection>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RelayActiveCallSummary {
+    pub call_id: String,
+    pub host_id: String,
+    pub client_id: String,
+    pub session_id: Option<String>,
+    pub mode: String,
+    pub state: String,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub media_config: Option<RelayMediaConfig>,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
@@ -22,6 +52,10 @@ pub struct RelayAgentStatus {
     pub last_sync_at: Option<String>,
     pub connected_at: Option<String>,
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub media_defaults: Option<RelayMediaConfig>,
+    #[serde(default)]
+    pub active_call: Option<RelayActiveCallSummary>,
     pub log_path: String,
 }
 
@@ -34,6 +68,7 @@ pub struct RelayPairingInvite {
     pub code: String,
     pub expires_at: String,
     pub pairing_url: String,
+    pub pairing_app_url: String,
 }
 
 fn agenthub_dir() -> Result<PathBuf, String> {
@@ -64,85 +99,12 @@ fn agenthub_logs_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn relay_agent_pid_path() -> Result<PathBuf, String> {
-    Ok(agenthub_runtime_dir()?.join("relay-agent.pid"))
-}
-
 fn relay_agent_state_path() -> Result<PathBuf, String> {
     Ok(agenthub_runtime_dir()?.join("relay-agent.json"))
 }
 
 fn relay_agent_log_path() -> Result<PathBuf, String> {
-    Ok(agenthub_logs_dir()?.join("relay-agent.log"))
-}
-
-fn relay_agent_script_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("scripts")
-        .join("relay-agent.mjs")
-}
-
-fn agenthub_project_root() -> Result<PathBuf, String> {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .map(|path| path.to_path_buf())
-        .ok_or("Cannot determine AgentHub project root".to_string())
-}
-
-fn with_augmented_path(cmd: &mut Command) {
-    if let Some(home) = dirs::home_dir() {
-        let cargo_bin = home.join(".cargo/bin");
-        let npm_bin = home.join(".npm-global/bin");
-        let local_bin = home.join(".local/bin");
-        let brew_bin = std::path::PathBuf::from("/opt/homebrew/bin");
-        let usr_local_bin = std::path::PathBuf::from("/usr/local/bin");
-        let current_path = std::env::var("PATH").unwrap_or_default();
-        cmd.env(
-            "PATH",
-            format!(
-                "{}:{}:{}:{}:{}:{}",
-                cargo_bin.to_string_lossy(),
-                npm_bin.to_string_lossy(),
-                local_bin.to_string_lossy(),
-                brew_bin.to_string_lossy(),
-                usr_local_bin.to_string_lossy(),
-                current_path
-            ),
-        );
-    }
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-fn read_pid_file(path: &PathBuf) -> Result<Option<u32>, String> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let content =
-        fs::read_to_string(path).map_err(|error| format!("Failed to read pid file: {}", error))?;
-    Ok(content.trim().parse::<u32>().ok())
-}
-
-fn write_pid_file(path: &PathBuf, pid: u32) -> Result<(), String> {
-    fs::write(path, format!("{}\n", pid))
-        .map_err(|error| format!("Failed to write pid file: {}", error))
-}
-
-fn pid_is_running(pid: u32) -> bool {
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-}
-
-fn remove_file_if_exists(path: PathBuf) {
-    if path.exists() {
-        let _ = fs::remove_file(path);
-    }
+    Ok(agenthub_logs_dir()?.join("remote-bridge.log"))
 }
 
 fn default_host_display_name() -> String {
@@ -206,6 +168,27 @@ pub(crate) fn build_pairing_url(
     format!("{}/pair#pairing={}", landing_base, encoded)
 }
 
+pub(crate) fn build_pairing_app_url(
+    relay_base_url: &str,
+    host_id: &str,
+    invite_id: &str,
+    code: &str,
+    expires_at: &str,
+) -> String {
+    let normalized = normalize_relay_base_url(relay_base_url)
+        .unwrap_or_else(|| relay_base_url.trim().to_string());
+    let payload = json!({
+        "v": 1,
+        "relayBaseUrl": normalized,
+        "hostId": host_id,
+        "inviteId": invite_id,
+        "code": code,
+        "expiresAt": expires_at,
+    });
+    let encoded = URL_SAFE_NO_PAD.encode(payload.to_string().as_bytes());
+    format!("lobster://pair?pairing={}", encoded)
+}
+
 pub(crate) fn build_relay_api_url(relay_base_url: &str, path: &str) -> String {
     let normalized = normalize_relay_base_url(relay_base_url)
         .unwrap_or_else(|| relay_base_url.trim().to_string());
@@ -240,6 +223,8 @@ fn default_relay_agent_status() -> Result<RelayAgentStatus, String> {
         last_sync_at: None,
         connected_at: None,
         last_error: None,
+        media_defaults: None,
+        active_call: None,
         log_path: relay_agent_log_path()?.to_string_lossy().to_string(),
     })
 }
@@ -278,50 +263,8 @@ fn write_relay_agent_state(status: &RelayAgentStatus) -> Result<(), String> {
         .map_err(|error| format!("Failed to write relay agent state: {}", error))
 }
 
-fn find_node_path() -> Option<String> {
-    for candidate in [
-        "node",
-        "/opt/homebrew/bin/node",
-        "/usr/local/bin/node",
-        &format!(
-            "{}/.cargo/bin/node",
-            dirs::home_dir()
-                .map(|home| home.to_string_lossy().to_string())
-                .unwrap_or_default()
-        ),
-    ] {
-        let mut command = Command::new(candidate);
-        command.arg("--version");
-        with_augmented_path(&mut command);
-        if command
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
-        {
-            return Some(candidate.to_string());
-        }
-    }
-    None
-}
-
 fn stop_relay_agent_internal() -> Result<RelayAgentStatus, String> {
-    let mut pid = read_pid_file(&relay_agent_pid_path()?)?;
-    if pid.is_none() {
-        pid = read_relay_agent_state()
-            .ok()
-            .and_then(|status| status.pid)
-            .filter(|value| pid_is_running(*value));
-    }
-
-    if let Some(pid) = pid {
-        let _ = Command::new("kill").arg(pid.to_string()).status();
-        std::thread::sleep(Duration::from_millis(400));
-        if pid_is_running(pid) {
-            let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
-        }
-    }
-
-    remove_file_if_exists(relay_agent_pid_path()?);
+    let _ = super::remote::stop_remote_bridge();
 
     let mut status = read_relay_agent_state().or_else(|_| default_relay_agent_status())?;
     status.running = false;
@@ -336,15 +279,6 @@ fn spawn_relay_agent(
     force_restart: bool,
     relay_base_url: Option<String>,
 ) -> Result<RelayAgentStatus, String> {
-    if force_restart {
-        let _ = stop_relay_agent_internal();
-    } else {
-        let existing = get_relay_agent_status()?;
-        if existing.running {
-            return Ok(existing);
-        }
-    }
-
     let existing = read_relay_agent_state().or_else(|_| default_relay_agent_status())?;
     let relay_base_url = relay_base_url
         .and_then(|value| normalize_relay_base_url(&value))
@@ -357,38 +291,6 @@ fn spawn_relay_agent(
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(default_host_display_name);
 
-    let script_path = relay_agent_script_path();
-    if !script_path.exists() {
-        let mut errored = default_relay_agent_status()?;
-        errored.status = "error".to_string();
-        errored.relay_base_url = Some(relay_base_url);
-        errored.host_id = Some(host_id);
-        errored.host_display_name = Some(host_display_name);
-        errored.last_error = Some(format!(
-            "relay agent 脚本不存在：{}",
-            script_path.display()
-        ));
-        errored.updated_at = Some(Utc::now().to_rfc3339());
-        write_relay_agent_state(&errored)?;
-        return Ok(errored);
-    }
-
-    let node = match find_node_path() {
-        Some(path) => path,
-        None => {
-            let mut errored = default_relay_agent_status()?;
-            errored.status = "error".to_string();
-            errored.relay_base_url = Some(relay_base_url);
-            errored.host_id = Some(host_id);
-            errored.host_display_name = Some(host_display_name);
-            errored.last_error = Some("没有找到可用的 node 可执行文件。".to_string());
-            errored.updated_at = Some(Utc::now().to_rfc3339());
-            write_relay_agent_state(&errored)?;
-            return Ok(errored);
-        }
-    };
-
-    let log_path = relay_agent_log_path()?;
     let mut starting = default_relay_agent_status()?;
     starting.status = "starting".to_string();
     starting.running = false;
@@ -397,86 +299,42 @@ fn spawn_relay_agent(
     starting.host_display_name = Some(host_display_name.clone());
     starting.updated_at = Some(Utc::now().to_rfc3339());
     write_relay_agent_state(&starting)?;
-
-    let shell_command = format!(
-        "nohup {} {} >> {} 2>&1 < /dev/null & echo $!",
-        shell_quote(&node),
-        shell_quote(&script_path.to_string_lossy()),
-        shell_quote(&log_path.to_string_lossy())
-    );
-
-    let mut command = Command::new("sh");
-    command.arg("-lc").arg(shell_command);
-    command.env(
-        "AGENTHUB_PROJECT_ROOT",
-        agenthub_project_root()?.to_string_lossy().to_string(),
-    );
-    command.env(
-        "AGENTHUB_RELAY_AGENT_STATE_PATH",
-        relay_agent_state_path()?.to_string_lossy().to_string(),
-    );
-    command.env(
-        "AGENTHUB_RELAY_AGENT_LOG_PATH",
-        log_path.to_string_lossy().to_string(),
-    );
-    command.env("AGENTHUB_RELAY_BASE_URL", relay_base_url);
-    command.env("AGENTHUB_RELAY_HOST_ID", host_id);
-    command.env("AGENTHUB_RELAY_HOST_DISPLAY_NAME", host_display_name);
-    with_augmented_path(&mut command);
-
-    let output = command
-        .output()
-        .map_err(|error| format!("Failed to start relay agent: {}", error))?;
-    if !output.status.success() {
-        let mut errored = read_relay_agent_state().or_else(|_| default_relay_agent_status())?;
-        errored.status = "error".to_string();
-        errored.last_error = Some(format!(
-            "启动 relay agent 失败：{}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-        errored.updated_at = Some(Utc::now().to_rfc3339());
-        write_relay_agent_state(&errored)?;
-        return Ok(errored);
-    }
-
-    let pid = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<u32>()
-        .ok();
-    if let Some(pid) = pid {
-        write_pid_file(&relay_agent_pid_path()?, pid)?;
-    }
-
-    std::thread::sleep(Duration::from_millis(900));
+    let needs_restart = force_restart
+        || existing.relay_base_url.as_deref() != Some(relay_base_url.as_str());
+    super::remote::spawn_remote_bridge(
+        needs_restart,
+        Some(super::remote::RemoteRelayConfig {
+            relay_base_url: Some(relay_base_url),
+            relay_host_id: Some(host_id),
+            relay_host_display_name: Some(host_display_name),
+            relay_state_path: Some(relay_agent_state_path()?.to_string_lossy().to_string()),
+        }),
+    )?;
     get_relay_agent_status()
 }
 
 #[tauri::command]
 pub fn get_relay_agent_status() -> Result<RelayAgentStatus, String> {
     let mut status = read_relay_agent_state().or_else(|_| default_relay_agent_status())?;
-    let pid_path = relay_agent_pid_path()?;
-    let pid_from_file = read_pid_file(&pid_path)?;
-    let pid_from_state = status.pid.filter(|pid| pid_is_running(*pid));
-    let running_pid = pid_from_file
-        .filter(|pid| pid_is_running(*pid))
-        .or(pid_from_state);
+    let gateway_status = super::remote::get_remote_bridge_status().ok();
+    let running_pid = gateway_status
+        .as_ref()
+        .filter(|gateway| gateway.running)
+        .and_then(|gateway| gateway.pid);
 
-    if let Some(pid) = running_pid {
-        status.running = true;
-        status.pid = Some(pid);
+    status.running = running_pid.is_some() && status.relay_base_url.is_some();
+    status.pid = running_pid;
+    if status.running {
         if status.status == "starting" || status.status == "stopped" {
             status.status = "running".to_string();
         }
-        let _ = write_pid_file(&pid_path, pid);
-    } else {
-        status.running = false;
-        status.pid = None;
-        if status.status == "running" || status.status == "starting" {
-            status.status = "stopped".to_string();
-        }
+    } else if status.status == "running" || status.status == "starting" {
+        status.status = "stopped".to_string();
     }
 
-    status.log_path = relay_agent_log_path()?.to_string_lossy().to_string();
+    status.log_path = gateway_status
+        .map(|gateway| gateway.log_path)
+        .unwrap_or_else(|| relay_agent_log_path().unwrap_or_default().to_string_lossy().to_string());
     Ok(status)
 }
 
@@ -556,6 +414,8 @@ pub async fn create_relay_pairing_invite(
     let expires_at = (Utc::now() + ChronoDuration::seconds(ttl_secs.unwrap_or(300)))
         .to_rfc3339();
     let pairing_url = build_pairing_url(&relay_base_url, &host_id, &invite_id, &code, &expires_at);
+    let pairing_app_url =
+        build_pairing_app_url(&relay_base_url, &host_id, &invite_id, &code, &expires_at);
 
     let invite = RelayPairingInvite {
         invite_id,
@@ -564,6 +424,7 @@ pub async fn create_relay_pairing_invite(
         code,
         expires_at,
         pairing_url,
+        pairing_app_url,
     };
 
     register_pairing_invite(&status, &invite).await?;
@@ -573,7 +434,11 @@ pub async fn create_relay_pairing_invite(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_pairing_url, build_relay_api_url, normalize_relay_base_url};
+    use super::{
+        build_pairing_app_url, build_pairing_url, build_relay_api_url, normalize_relay_base_url,
+        RelayAgentStatus,
+    };
+    use serde_json::json;
 
     #[test]
     fn normalize_relay_base_url_trims_and_removes_trailing_slash() {
@@ -599,6 +464,20 @@ mod tests {
     }
 
     #[test]
+    fn build_pairing_app_url_uses_custom_scheme() {
+        let url = build_pairing_app_url(
+            "https://relay.example.workers.dev/api",
+            "host_123",
+            "invite_123",
+            "PAIR-123456",
+            "2026-04-03T12:05:00.000Z",
+        );
+
+        assert!(url.starts_with("lobster://pair?pairing="));
+        assert!(url.contains("pairing="));
+    }
+
+    #[test]
     fn build_relay_api_url_normalizes_api_suffix() {
         assert_eq!(
             build_relay_api_url("https://relay.example.workers.dev/api", "/pairing/invites"),
@@ -607,6 +486,70 @@ mod tests {
         assert_eq!(
             build_relay_api_url("https://relay.example.workers.dev", "hosts/sync"),
             "https://relay.example.workers.dev/api/hosts/sync"
+        );
+    }
+
+    #[test]
+    fn relay_status_parses_active_call_summary() {
+        let status: RelayAgentStatus = serde_json::from_value(json!({
+            "running": true,
+            "pid": 4242,
+            "status": "running",
+            "relayBaseUrl": "https://relay.example.workers.dev",
+            "hostId": "host_demo",
+            "hostDisplayName": "Demo Mac",
+            "sessionCount": 3,
+            "startedAt": "2026-04-04T10:00:00.000Z",
+            "updatedAt": "2026-04-04T10:01:00.000Z",
+            "lastSyncAt": "2026-04-04T10:01:00.000Z",
+            "connectedAt": "2026-04-04T10:00:05.000Z",
+            "mediaDefaults": {
+                "voice": {
+                    "providerId": "volcengine",
+                    "modelId": "doubao-realtime-asr"
+                },
+                "video": {
+                    "providerId": "googleapis",
+                    "modelId": "gemini-2.5-flash"
+                }
+            },
+            "logPath": "/tmp/relay.log",
+            "activeCall": {
+                "callId": "call_123",
+                "hostId": "host_demo",
+                "clientId": "client_ios",
+                "sessionId": "thread_voice",
+                "mode": "audio",
+                "state": "live",
+                "createdAt": "2026-04-04T10:00:30.000Z",
+                "updatedAt": "2026-04-04T10:01:00.000Z",
+                "mediaConfig": {
+                    "voice": {
+                        "providerId": "bigmodel",
+                        "modelId": "glm-asr-2512"
+                    }
+                }
+            }
+        }))
+        .expect("relay status should decode active call");
+
+        let media_defaults = status.media_defaults.expect("media defaults should exist");
+        assert_eq!(
+            media_defaults.voice.as_ref().map(|value| value.provider_id.as_str()),
+            Some("volcengine")
+        );
+        let active_call = status.active_call.expect("active call should exist");
+        assert_eq!(active_call.call_id, "call_123");
+        assert_eq!(active_call.mode, "audio");
+        assert_eq!(active_call.state, "live");
+        assert_eq!(active_call.session_id.as_deref(), Some("thread_voice"));
+        assert_eq!(
+            active_call
+                .media_config
+                .as_ref()
+                .and_then(|media| media.voice.as_ref())
+                .map(|value| value.model_id.as_str()),
+            Some("glm-asr-2512")
         );
     }
 }

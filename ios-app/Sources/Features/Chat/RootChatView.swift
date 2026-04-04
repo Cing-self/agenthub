@@ -1,7 +1,9 @@
 import SwiftUI
+import UIKit
 
 struct RootChatView: View {
     @ObservedObject var store: ChatStore
+    @Environment(\.colorScheme) private var colorScheme
     @FocusState private var isComposerFocused: Bool
     @State private var didRunStartup = false
 
@@ -10,17 +12,33 @@ struct RootChatView: View {
             backgroundGradient
                 .ignoresSafeArea()
 
+            backgroundAtmosphere
+                .ignoresSafeArea()
+
             VStack(spacing: 14) {
                 HeaderBar(
                     title: currentTitle,
                     subtitle: headerSubtitle,
                     isRelayMode: store.isRelayMode,
                     connectionState: store.connectionState,
+                    currentCall: store.currentRelayCall,
                     onOpenHistory: openHistory,
-                    onPrimaryAction: primaryAction
+                    onPrimaryAction: primaryAction,
+                    onCallAction: callAction
                 )
 
-                TimelinePane(store: store)
+                if let currentCall = store.currentRelayCall {
+                    RelayCallBanner(
+                        call: currentCall,
+                        effectiveMediaConfig: currentCall.effectiveMediaConfig(defaults: store.selectedHost?.mediaDefaults),
+                        onAction: callAction
+                    )
+                }
+
+                TimelinePane(
+                    store: store,
+                    onBackgroundTap: dismissComposerFromSurfaceTap
+                )
 
                 ComposerBar(
                     draft: $store.draft,
@@ -46,9 +64,17 @@ struct RootChatView: View {
             }
 
             if store.connectionState == .connecting {
-                ConnectingOverlay(isRelayMode: store.isRelayMode)
+                ConnectingOverlay(
+                    isRelayMode: store.isRelayMode,
+                    stage: store.connectionStage
+                )
             }
         }
+        .simultaneousGesture(
+            TapGesture().onEnded {
+                dismissComposerFromSurfaceTap()
+            }
+        )
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .sheet(isPresented: $store.isShowingConnectionSheet) {
             ConnectionSheet(store: store)
@@ -79,14 +105,16 @@ struct RootChatView: View {
 
     private var headerSubtitle: String {
         if store.isRelayMode {
-            if let host = store.selectedHost {
-                return "\(host.displayName) · \(host.status)"
-            }
+            return MessagePresentation.localizedHostSubtitle(host: store.selectedHost)
         }
 
         switch store.connectionState {
         case .connected:
-            return store.selectedThread?.thread.updatedAt ?? "Direct bridge connected"
+            if let updatedAt = store.selectedThread?.thread.updatedAt,
+               let formatted = MessagePresentation.formattedTimestamp(updatedAt) {
+                return "Updated \(formatted)"
+            }
+            return "Direct bridge connected"
         case .connecting:
             return "Connecting..."
         case .failed:
@@ -97,14 +125,11 @@ struct RootChatView: View {
     }
 
     private var backgroundGradient: LinearGradient {
-        LinearGradient(
-            colors: [
-                Color(red: 0.99, green: 0.97, blue: 0.95),
-                Color(red: 0.95, green: 0.93, blue: 0.90),
-            ],
-            startPoint: .top,
-            endPoint: .bottom
-        )
+        palette.backgroundGradient
+    }
+
+    private var backgroundAtmosphere: some View {
+        Color.clear
     }
 
     private func openHistory() {
@@ -134,49 +159,87 @@ struct RootChatView: View {
             await store.sendCurrentDraft()
         }
     }
+
+    private func callAction() {
+        Task {
+            if store.currentRelayCall == nil {
+                await store.startRelayAudioCall()
+            } else {
+                await store.endCurrentRelayCall()
+            }
+        }
+    }
+
+    private var palette: ChatChromePalette {
+        ChatChromePresentation.palette(for: colorScheme)
+    }
+
+    private func dismissComposerFromSurfaceTap() {
+        guard ChatInteractionPresentation.shouldDismissComposerOnBackgroundTap(isComposerFocused: isComposerFocused) else {
+            return
+        }
+
+        isComposerFocused = false
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
 }
 
 private struct HeaderBar: View {
+    @Environment(\.colorScheme) private var colorScheme
     let title: String
     let subtitle: String
     let isRelayMode: Bool
     let connectionState: ChatStore.ConnectionState
+    let currentCall: RelayCallSummary?
     let onOpenHistory: () -> Void
     let onPrimaryAction: () -> Void
+    let onCallAction: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
             Button(action: onOpenHistory) {
                 Image(systemName: "sidebar.leading")
                     .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(palette.primaryTextColor)
                     .frame(width: 38, height: 38)
-                    .background(.white.opacity(0.8), in: Circle())
             }
             .buttonStyle(.plain)
 
             VStack(spacing: 2) {
                 Text(title)
                     .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(palette.primaryTextColor)
                     .lineLimit(1)
 
                 Text(subtitle)
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(palette.secondaryTextColor)
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity)
 
-            Button(action: onPrimaryAction) {
-                Image(systemName: primaryIconName)
-                    .font(.system(size: 16, weight: .semibold))
-                    .frame(width: 38, height: 38)
-                    .background(Color.accentColor.opacity(0.14), in: Circle())
+            HStack(spacing: 12) {
+                if isRelayMode {
+                    Button(action: onCallAction) {
+                        Image(systemName: callIconName)
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(callIconColor)
+                            .frame(width: 38, height: 38)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Button(action: onPrimaryAction) {
+                    Image(systemName: primaryIconName)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(palette.primaryTextColor)
+                        .frame(width: 38, height: 38)
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 10)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .padding(.horizontal, 4)
+        .padding(.vertical, 6)
     }
 
     private var primaryIconName: String {
@@ -185,36 +248,139 @@ private struct HeaderBar: View {
         }
         return "link.badge.plus"
     }
+
+    private var callIconName: String {
+        currentCall == nil ? "phone" : "phone.down.fill"
+    }
+
+    private var callIconColor: Color {
+        currentCall == nil ? Color.accentColor : Color.red
+    }
+
+    private var palette: ChatChromePalette {
+        ChatChromePresentation.palette(for: colorScheme)
+    }
+}
+
+private struct RelayCallBanner: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let call: RelayCallSummary
+    let effectiveMediaConfig: RelayMediaConfig?
+    let onAction: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: call.state == .live ? "waveform" : "phone")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(statusText)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(palette.primaryTextColor)
+
+                if let mediaSummaryText {
+                    Text(mediaSummaryText)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(palette.secondaryTextColor)
+                        .lineLimit(2)
+                }
+            }
+
+            Spacer(minLength: 12)
+
+            Button(call.state == .live ? "Hang up" : "End") {
+                onAction()
+            }
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(call.state == .live ? Color.red : palette.secondaryTextColor)
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(palette.surfaceColor, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(palette.inputStrokeColor, lineWidth: 1)
+        }
+    }
+
+    private var statusText: String {
+        switch call.state {
+        case .dialing:
+            return "Calling your local agent..."
+        case .ringing:
+            return "Call is ringing..."
+        case .connecting:
+            return "Connecting voice channel..."
+        case .live:
+            return "Voice call is live"
+        case .ended:
+            return "Call ended"
+        case .failed:
+            return "Call failed"
+        case .idle:
+            return "Voice call is idle"
+        }
+    }
+
+    private var mediaSummaryText: String? {
+        var parts: [String] = []
+        if let voice = effectiveMediaConfig?.voice {
+            parts.append("Voice \(voice.providerId)/\(voice.modelId)")
+        }
+        if let video = effectiveMediaConfig?.video {
+            parts.append("Video \(video.providerId)/\(video.modelId)")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " | ")
+    }
+
+    private var palette: ChatChromePalette {
+        ChatChromePresentation.palette(for: colorScheme)
+    }
 }
 
 private struct TimelinePane: View {
     @ObservedObject var store: ChatStore
+    let onBackgroundTap: () -> Void
 
     var body: some View {
         if store.isRelayMode {
             RelaySessionPane(
                 session: store.selectedRelaySession,
-                host: store.selectedHost
+                host: store.selectedHost,
+                messages: store.selectedRelayMessages,
+                isSending: store.isSending,
+                showSendingIndicator: store.isSending && !store.selectedRelayHasAssistantPreview,
+                onBackgroundTap: onBackgroundTap
             )
         } else {
-            DirectTimelinePane(thread: store.selectedThread)
+            DirectTimelinePane(
+                messages: store.selectedDirectMessages,
+                isSending: store.isSending,
+                onBackgroundTap: onBackgroundTap
+            )
         }
     }
 }
 
 private struct DirectTimelinePane: View {
-    let thread: ThreadEnvelope?
+    let messages: [BridgeMessage]
+    let isSending: Bool
+    let onBackgroundTap: () -> Void
 
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 12) {
-                    DayChip()
-
-                    if let thread, !thread.messages.isEmpty {
-                        ForEach(thread.messages) { message in
+                    if !messages.isEmpty {
+                        ForEach(messages) { message in
                             MessageRow(message: message)
                                 .id(message.id)
+                        }
+
+                        if isSending {
+                            RelaySendingRow()
                         }
                     } else {
                         EmptyConversationCard()
@@ -224,8 +390,11 @@ private struct DirectTimelinePane: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .scrollIndicators(.hidden)
-            .onChange(of: thread?.messages.count) { _, _ in
-                if let lastID = thread?.messages.last?.id {
+            .scrollDismissesKeyboard(.interactively)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onBackgroundTap)
+            .onChange(of: messages.count) { _, _ in
+                if let lastID = messages.last?.id {
                     withAnimation(.easeOut(duration: 0.2)) {
                         proxy.scrollTo(lastID, anchor: .bottom)
                     }
@@ -238,40 +407,71 @@ private struct DirectTimelinePane: View {
 private struct RelaySessionPane: View {
     let session: RelaySession?
     let host: RelayHost?
+    let messages: [BridgeMessage]
+    let isSending: Bool
+    let showSendingIndicator: Bool
+    let onBackgroundTap: () -> Void
 
     var body: some View {
+        ScrollViewReader { proxy in
         ScrollView {
-            VStack(spacing: 14) {
-                DayChip(label: "Relay")
+            LazyVStack(spacing: 12) {
+                    if messages.isEmpty {
+                        if let session {
+                            RelayConversationHint(session: session, host: host, isSending: isSending)
+                        } else {
+                            RelayEmptyState()
+                        }
+                    } else {
+                        ForEach(messages) { message in
+                            MessageRow(message: message)
+                                .id(message.id)
+                        }
 
-                if let session {
-                    RelaySessionCard(session: session, host: host)
-                } else {
-                    RelayEmptyState()
+                        if showSendingIndicator {
+                            RelaySendingRow()
+                        }
+                    }
+                }
+                .padding(.vertical, 12)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .scrollIndicators(.hidden)
+            .scrollDismissesKeyboard(.interactively)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onBackgroundTap)
+            .onChange(of: messages.count) { _, _ in
+                if let lastID = messages.last?.id {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        proxy.scrollTo(lastID, anchor: .bottom)
+                    }
                 }
             }
-            .padding(.vertical, 12)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .scrollIndicators(.hidden)
     }
 }
 
 private struct DayChip: View {
+    @Environment(\.colorScheme) private var colorScheme
     var label: String = "Today"
 
     var body: some View {
         Text(label)
             .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(.secondary)
+            .foregroundStyle(palette.secondaryTextColor)
             .padding(.horizontal, 18)
             .padding(.vertical, 8)
-            .background(.white.opacity(0.75), in: Capsule())
+            .background(palette.chipColor, in: Capsule())
             .frame(maxWidth: .infinity)
+    }
+
+    private var palette: ChatChromePalette {
+        ChatChromePresentation.palette(for: colorScheme)
     }
 }
 
 private struct ComposerBar: View {
+    @Environment(\.colorScheme) private var colorScheme
     @Binding var draft: String
     @FocusState.Binding var isFocused: Bool
     let isRelayMode: Bool
@@ -281,22 +481,27 @@ private struct ComposerBar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .bottom, spacing: 12) {
+            HStack(alignment: .center, spacing: 10) {
                 TextField(
-                    isRelayMode ? "Relay text stream is coming next..." : "Send message...",
+                    isRelayMode ? "Message dolphin..." : "Send message...",
                     text: $draft,
                     axis: .vertical
                 )
                 .focused($isFocused)
-                .lineLimit(1 ... 5)
+                .font(.system(size: 16))
+                .foregroundStyle(palette.primaryTextColor)
+                .lineLimit(1 ... ComposerPresentation.maxLineCount)
                 .textFieldStyle(.plain)
-                .disabled(isRelayMode)
+                .padding(.vertical, ComposerPresentation.textVerticalInset)
 
                 Button(action: onSend) {
                     Image(systemName: "arrow.up")
-                        .font(.system(size: 17, weight: .bold))
+                        .font(.system(size: ComposerPresentation.buttonIconSize, weight: .bold))
                         .foregroundStyle(.white)
-                        .frame(width: 46, height: 46)
+                        .frame(
+                            width: ComposerPresentation.buttonDiameter,
+                            height: ComposerPresentation.buttonDiameter
+                        )
                         .background(buttonBackgroundColor, in: Circle())
                 }
                 .buttonStyle(.plain)
@@ -307,100 +512,39 @@ private struct ComposerBar: View {
                 Text(message)
                     .font(.system(size: 12))
                     .foregroundStyle(.red)
-            } else {
-                Text(helperText)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
-        .background(.white, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
-        .shadow(color: .black.opacity(0.08), radius: 18, y: 10)
+        .padding(.horizontal, ComposerPresentation.horizontalPadding)
+        .padding(.vertical, ComposerPresentation.verticalPadding)
+        .background(palette.surfaceColor, in: RoundedRectangle(cornerRadius: ComposerPresentation.cornerRadius, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: ComposerPresentation.cornerRadius, style: .continuous)
+                .stroke(palette.inputStrokeColor, lineWidth: 1)
+        }
     }
 
     private var isSendDisabled: Bool {
-        isRelayMode || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSending
+        draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isSending
     }
 
     private var buttonBackgroundColor: Color {
-        isSendDisabled ? .black.opacity(0.25) : .black.opacity(0.82)
+        isSendDisabled
+            ? palette.composerButtonDisabledColor
+            : palette.composerButtonEnabledColor
     }
 
-    private var helperText: String {
-        if isRelayMode {
-            return "Relay 配对和 session 切换已经接通，文本 turn 还在接入中。需要即时聊天时先走 Advanced > Direct Bridge。"
-        }
-        return "先把 direct chat 跑通，后面这里会接入原生语音。"
-    }
-}
-
-private struct RelaySessionCard: View {
-    let session: RelaySession
-    let host: RelayHost?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(session.title)
-                        .font(.system(size: 22, weight: .semibold))
-                    Text(host?.displayName ?? session.hostId)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer()
-
-                Text(session.state)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Color.accentColor)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Color.accentColor.opacity(0.12), in: Capsule())
-            }
-
-            if !session.summary.isEmpty {
-                Text(session.summary)
-                    .font(.system(size: 15))
-                    .foregroundStyle(.secondary)
-            }
-
-            VStack(alignment: .leading, spacing: 10) {
-                SessionMetaRow(label: "Agent", value: session.primaryAgentId ?? "Unknown")
-                SessionMetaRow(label: "Updated", value: session.updatedAt)
-                SessionMetaRow(label: "Mode", value: "Relay session")
-            }
-        }
-        .padding(22)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.white.opacity(0.84), in: RoundedRectangle(cornerRadius: 30, style: .continuous))
-    }
-}
-
-private struct SessionMetaRow: View {
-    let label: String
-    let value: String
-
-    var body: some View {
-        HStack {
-            Text(label)
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.secondary)
-            Spacer()
-            Text(value)
-                .font(.system(size: 13, weight: .medium))
-                .multilineTextAlignment(.trailing)
-        }
+    private var palette: ChatChromePalette {
+        ChatChromePresentation.palette(for: colorScheme)
     }
 }
 
 private struct RelayEmptyState: View {
+    @Environment(\.colorScheme) private var colorScheme
     var body: some View {
-        VStack(spacing: 12) {
+        EmptyStateCard {
             Circle()
-                .fill(Color.accentColor.opacity(0.14))
-                .frame(width: 54, height: 54)
+                .fill(palette.accentFillColor)
+                .frame(width: 56, height: 56)
                 .overlay {
                     Image(systemName: "link")
                         .font(.system(size: 22, weight: .bold))
@@ -409,25 +553,94 @@ private struct RelayEmptyState: View {
 
             Text("Select a paired session")
                 .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(palette.primaryTextColor)
 
-            Text("Finish pairing, pick a host, then pick a session. This relay path will later carry text stream, voice, approvals, and control actions.")
+            Text("Finish pairing, pick a host, then choose a conversation.")
                 .multilineTextAlignment(.center)
                 .font(.system(size: 14))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(palette.secondaryTextColor)
         }
-        .padding(.horizontal, 30)
-        .padding(.vertical, 48)
-        .frame(maxWidth: .infinity)
-        .frame(maxHeight: .infinity)
+    }
+
+    private var palette: ChatChromePalette {
+        ChatChromePresentation.palette(for: colorScheme)
+    }
+}
+
+private struct RelayConversationHint: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let session: RelaySession
+    let host: RelayHost?
+    let isSending: Bool
+
+    var body: some View {
+        EmptyStateCard {
+            Circle()
+                .fill(palette.accentFillColor)
+                .frame(width: 56, height: 56)
+                .overlay {
+                    Image(systemName: isSending ? "hourglass" : "ellipsis.message")
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundStyle(Color.accentColor)
+                }
+
+            Text(isSending ? "正在等待回复" : "Start the conversation")
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(palette.primaryTextColor)
+
+            VStack(spacing: 6) {
+                Text(session.title)
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(palette.primaryTextColor)
+
+                Text("\(host?.displayName ?? session.hostId) · \(session.primaryAgentId ?? "dolphin")")
+                    .font(.system(size: 13))
+                    .foregroundStyle(palette.secondaryTextColor)
+            }
+            .multilineTextAlignment(.center)
+
+            Text(isSending ? "dolphin is preparing a reply." : "Send the first message to your local agent.")
+                .multilineTextAlignment(.center)
+                .font(.system(size: 14))
+                .foregroundStyle(palette.secondaryTextColor)
+        }
+    }
+
+    private var palette: ChatChromePalette {
+        ChatChromePresentation.palette(for: colorScheme)
+    }
+}
+
+private struct RelaySendingRow: View {
+    @Environment(\.colorScheme) private var colorScheme
+    var body: some View {
+        HStack {
+            HStack(spacing: 10) {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                Text("dolphin is replying...")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(palette.secondaryTextColor)
+            }
+            .padding(.horizontal, 2)
+            .padding(.vertical, 6)
+
+            Spacer(minLength: 32)
+        }
+    }
+
+    private var palette: ChatChromePalette {
+        ChatChromePresentation.palette(for: colorScheme)
     }
 }
 
 private struct EmptyConversationCard: View {
+    @Environment(\.colorScheme) private var colorScheme
     var body: some View {
-        VStack(spacing: 12) {
+        EmptyStateCard {
             Circle()
-                .fill(Color.accentColor.opacity(0.14))
-                .frame(width: 54, height: 54)
+                .fill(palette.accentFillColor)
+                .frame(width: 56, height: 56)
                 .overlay {
                     Text("L")
                         .font(.system(size: 22, weight: .bold))
@@ -436,39 +649,77 @@ private struct EmptyConversationCard: View {
 
             Text("开始一段新对话")
                 .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(palette.primaryTextColor)
 
-            Text("这里会直接连到你本地机器上的 Agent，后面语音和远程控制都会复用这一层。")
+            Text("Send the first message to begin.")
                 .multilineTextAlignment(.center)
                 .font(.system(size: 14))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(palette.secondaryTextColor)
         }
-        .padding(.horizontal, 30)
-        .padding(.vertical, 48)
+    }
+
+    private var palette: ChatChromePalette {
+        ChatChromePresentation.palette(for: colorScheme)
+    }
+}
+
+private struct EmptyStateCard<Content: View>: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(spacing: 12) {
+            content
+        }
+        .padding(.horizontal, 28)
+        .padding(.vertical, 28)
         .frame(maxWidth: .infinity)
-        .frame(maxHeight: .infinity)
+        .padding(.horizontal, 22)
+        .padding(.top, 56)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 }
 
 private struct ConnectingOverlay: View {
+    @Environment(\.colorScheme) private var colorScheme
     let isRelayMode: Bool
+    let stage: ConnectionProgressStage?
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 10) {
             ProgressView()
                 .progressViewStyle(.circular)
-            Text(isRelayMode ? "正在同步 Relay workspace…" : "正在连接 Direct Bridge…")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.primary)
+            Text(stage?.title ?? fallbackTitle)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(palette.primaryTextColor)
+
+            Text(stage?.detail ?? fallbackDetail)
+                .multilineTextAlignment(.center)
+                .font(.system(size: 13))
+                .foregroundStyle(palette.secondaryTextColor)
         }
         .padding(.horizontal, 24)
-        .padding(.vertical, 18)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .padding(.vertical, 20)
+        .background(palette.surfaceColor, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black.opacity(0.06).ignoresSafeArea())
+        .background(palette.overlayDimColor.ignoresSafeArea())
+    }
+
+    private var fallbackTitle: String {
+        isRelayMode ? "正在连接 Relay workspace" : "正在连接 Direct Bridge"
+    }
+
+    private var fallbackDetail: String {
+        isRelayMode ? "请稍候，正在同步这台 Mac 的远程入口。" : "正在检查本机桥接入口和凭证。"
+    }
+
+    private var palette: ChatChromePalette {
+        ChatChromePresentation.palette(for: colorScheme)
     }
 }
 
 private struct MessageRow: View {
+    @Environment(\.colorScheme) private var colorScheme
     let message: BridgeMessage
 
     var body: some View {
@@ -485,40 +736,67 @@ private struct MessageRow: View {
 
     private var bubble: some View {
         VStack(alignment: message.isAssistant ? .leading : .trailing, spacing: 6) {
-            Text(message.content)
-                .font(.system(size: 16))
-                .foregroundStyle(.primary)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 14)
-                .background(bubbleBackground, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-
-            HStack(spacing: 6) {
-                Text(message.isAssistant ? (message.agentId ?? "Lobster") : "你")
-                if let timestamp = message.timestamp {
-                    Text(timestamp)
-                        .lineLimit(1)
+            Group {
+                if message.isAssistant {
+                    MessageBody(message: message)
+                        .padding(.vertical, 4)
+                } else {
+                    MessageBody(message: message)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 14)
+                        .background(palette.userBubbleColor, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
                 }
             }
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(.secondary)
+
+            if let metadata = MessagePresentation.metadataText(for: message) {
+                Text(metadata)
+                    .lineLimit(1)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(palette.metadataTextColor)
+            }
         }
-        .frame(maxWidth: 290, alignment: message.isAssistant ? .leading : .trailing)
+        .frame(
+            maxWidth: message.isAssistant ? .infinity : 290,
+            alignment: message.isAssistant ? .leading : .trailing
+        )
     }
 
-    private var bubbleBackground: some ShapeStyle {
-        if message.isAssistant {
-            return AnyShapeStyle(Color.white.opacity(0.86))
-        }
+    private var palette: ChatChromePalette {
+        ChatChromePresentation.palette(for: colorScheme)
+    }
+}
 
-        return AnyShapeStyle(
-            LinearGradient(
-                colors: [
-                    Color(red: 0.99, green: 0.95, blue: 0.92),
-                    Color(red: 0.98, green: 0.93, blue: 0.90),
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
-        )
+private struct MessageBody: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let message: BridgeMessage
+
+    var body: some View {
+        let preview = MessagePresentation.preview(for: message.content)
+
+        Group {
+            if preview.kind == .plain, let attributed = preview.attributed {
+                Text(attributed)
+                    .font(.system(size: 16))
+                    .foregroundStyle(textColor)
+                    .lineSpacing(3)
+            } else {
+                Text(preview.renderedText)
+                    .font(.system(size: 16))
+                    .foregroundStyle(textColor)
+                    .lineSpacing(3)
+            }
+        }
+        .multilineTextAlignment(.leading)
+    }
+
+    private var textColor: Color {
+        if message.isAssistant {
+            return palette.assistantTextColor
+        }
+        return palette.userBubbleTextColor
+    }
+
+    private var palette: ChatChromePalette {
+        ChatChromePresentation.palette(for: colorScheme)
     }
 }
