@@ -2,6 +2,8 @@
 
 [English README](../README.md)
 
+[平台整体规划](./platform-roadmap-2026-04-03.zh-CN.md)
+
 AgentHub 是一个本地优先的桌面控制台，用来管理和协作多个 AI Agent。
 
 它主要由三部分组成：
