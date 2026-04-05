@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { Toaster } from "sonner";
 import { toast } from "sonner";
+import { CompanionShell } from "./components/companion/CompanionShell";
 import { Sidebar } from "./components/layout/Sidebar";
 import { WindowChrome } from "./components/layout/WindowChrome";
 import { useThemeStore } from "./stores/theme-store";
@@ -115,6 +116,7 @@ function App() {
           </main>
         </div>
       </div>
+      <CompanionShell />
       <Toaster theme={theme} position="bottom-right" />
     </div>
   );
