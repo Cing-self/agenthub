@@ -13,8 +13,17 @@ import {
   fetchRelayJson,
   processPendingRelayTurn,
 } from "./relay-agent.mjs";
-import { createGatewayCallController } from "./gateway-call-controller.mjs";
+import {
+  createGatewayCallController,
+} from "./gateway-call-controller.mjs";
+import { createGatewayVoiceSessionManager } from "./gateway-voice-session.mjs";
 import { executeGatewayTurn } from "./gateway-turn-executor.mjs";
+import { createVoiceBridgeRealtimeServer } from "./voice-bridge-realtime.mjs";
+import {
+  createVoiceDiagnosticsWriter,
+  requestEnablesVoiceDiagnostics,
+} from "./voice-diagnostics.mjs";
+import { createVoiceThreadMemoryStore } from "./voice-thread-memory.mjs";
 
 const projectRoot =
   process.env.AGENTHUB_PROJECT_ROOT ||
@@ -52,8 +61,22 @@ if (!token) {
 const hubPath = path.join(os.homedir(), ".agenthub", "hub.json");
 let activeThreadId = null;
 let activeRelayCall = null;
+let activeVoiceSession = null;
 let startedAt = new Date().toISOString();
 let lastRequestAt = null;
+const writeVoiceDiagnostics = createVoiceDiagnosticsWriter({ logPath });
+const voiceThreadMemoryStore = createVoiceThreadMemoryStore({
+  loadHub: readHubConfig,
+  writeHubConfig,
+});
+let voiceRealtimeServer = null;
+const voiceSessionManager = createGatewayVoiceSessionManager({
+  logDiagnostics: writeVoiceDiagnostics,
+  onInteraction: async (interaction) => {
+    await voiceThreadMemoryStore.recordInteraction(interaction);
+    voiceRealtimeServer?.publishInteraction(interaction);
+  },
+});
 
 function nowIso() {
   return new Date().toISOString();
@@ -141,6 +164,7 @@ async function writeRelayState(partial = {}, snapshot = null) {
     connectedAt: startedAt,
     lastError: null,
     activeCall: partial.activeCall ?? activeRelayCall,
+    activeVoiceSession: partial.activeVoiceSession ?? activeVoiceSession,
     mediaDefaults,
     logPath,
     ...partial,
@@ -175,6 +199,8 @@ async function markStopped() {
       pid: null,
       status: "stopped",
       connectedAt: null,
+      activeCall: null,
+      activeVoiceSession: null,
     }).catch(() => {});
   } catch {
     // noop
@@ -243,6 +269,45 @@ async function readHubConfig() {
 async function writeHubConfig(hub) {
   await fs.mkdir(path.dirname(hubPath), { recursive: true });
   await fs.writeFile(hubPath, `${JSON.stringify(hub, null, 2)}\n`, "utf8");
+}
+
+async function bindVoiceThreadForCall(call) {
+  const threadId = String(call?.sessionId || "").trim();
+  if (!threadId) {
+    return null;
+  }
+
+  const hub = await readHubConfig();
+  const thread = (hub.collaboration?.threads || []).find((item) => item.id === threadId);
+  if (!thread) {
+    return null;
+  }
+
+  const agentId =
+    thread.primary_agent_id ||
+    (hub.collaboration?.sessions || []).find((item) => item.thread_id === threadId)?.agent_id ||
+    readCustomAgents(hub)[0]?.id ||
+    "dolphin";
+  const session = ensureThreadSession(hub, {
+    threadId,
+    agentId,
+    runtimeSessionId: null,
+    mode: "voice",
+  });
+  await writeHubConfig(hub);
+
+  voiceThreadMemoryStore.bindCall({
+    callId: call.callId,
+    threadId,
+    agentId,
+    sessionId: session.id,
+  });
+
+  return {
+    threadId,
+    agentId,
+    sessionId: session.id,
+  };
 }
 
 function readCustomAgents(hub) {
@@ -759,6 +824,37 @@ function buildMessageView(event) {
   };
 }
 
+function buildVoiceDiagnosticsContext(req, callId) {
+  if (!requestEnablesVoiceDiagnostics(req.headers)) {
+    return null;
+  }
+
+  return {
+    enabled: true,
+    source: "ios-app",
+    transport: "direct-bridge",
+    callId,
+  };
+}
+
+function emitVoiceHttpDiagnostics(req, callId, event, extra = {}) {
+  const diagnostics = buildVoiceDiagnosticsContext(req, callId);
+  if (!diagnostics) {
+    return null;
+  }
+
+  void writeVoiceDiagnostics({
+    event,
+    callId,
+    source: diagnostics.source,
+    transport: diagnostics.transport,
+    method: req.method,
+    path: req.url,
+    ...extra,
+  });
+  return diagnostics;
+}
+
 const server = http.createServer(async (req, res) => {
   withCors(res);
 
@@ -851,6 +947,95 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    const voiceSessionMatch = url.pathname.match(/^\/calls\/([^/]+)\/voice-session$/);
+    if (req.method === "GET" && voiceSessionMatch) {
+      const callId = decodeURIComponent(voiceSessionMatch[1]);
+      const diagnostics = emitVoiceHttpDiagnostics(req, callId, "bridge:http:voice-session");
+      const session = voiceSessionManager.getSession(callId, diagnostics);
+      if (!session) {
+        return sendJson(res, 404, { ok: false, error: "voice_session_not_found" });
+      }
+      return sendJson(res, 200, { ok: true, session });
+    }
+
+    const audioChunkMatch = url.pathname.match(/^\/calls\/([^/]+)\/audio-chunks$/);
+    if (req.method === "POST" && audioChunkMatch) {
+      const callId = decodeURIComponent(audioChunkMatch[1]);
+      const diagnostics = emitVoiceHttpDiagnostics(req, callId, "bridge:http:audio-chunk");
+      const body = await readJsonBody(req);
+
+      try {
+        const session = await voiceSessionManager.appendAudioChunk({
+          callId,
+          audioBase64: body.audioBase64,
+          mimeType: body.mimeType,
+          sequence: body.sequence,
+          sampleRateHz: body.sampleRateHz,
+          channels: body.channels,
+          durationMs: body.durationMs,
+          diagnostics,
+        });
+
+        if (activeRelayCall?.callId === callId) {
+          activeVoiceSession = session;
+          await writeRelayState({
+            activeCall: activeRelayCall,
+            activeVoiceSession,
+            lastError: null,
+          }).catch(() => {});
+        }
+
+        return sendJson(res, 200, { ok: true, session });
+      } catch (error) {
+        const code = String(error?.message || error);
+        if (code === "voice_session_not_found") {
+          return sendJson(res, 404, { ok: false, error: code });
+        }
+        if (
+          code === "voice_session_not_ready" ||
+          code === "audio_chunk_required" ||
+          code === "audio_chunk_invalid"
+        ) {
+          return sendJson(res, 400, { ok: false, error: code });
+        }
+        throw error;
+      }
+    }
+
+    const audioOutputMatch = url.pathname.match(/^\/calls\/([^/]+)\/audio-output$/);
+    if (req.method === "GET" && audioOutputMatch) {
+      const callId = decodeURIComponent(audioOutputMatch[1]);
+      const diagnostics = emitVoiceHttpDiagnostics(req, callId, "bridge:http:audio-output");
+      const afterSequence = Number.parseInt(url.searchParams.get("afterSequence") || "-1", 10);
+      const limit = Number.parseInt(url.searchParams.get("limit") || "12", 10);
+
+      try {
+        const output = voiceSessionManager.getOutputAudio({
+          callId,
+          afterSequence: Number.isFinite(afterSequence) ? afterSequence : -1,
+          limit: Number.isFinite(limit) ? limit : 12,
+          diagnostics,
+        });
+
+        if (activeRelayCall?.callId === callId) {
+          activeVoiceSession = output.session;
+          await writeRelayState({
+            activeCall: activeRelayCall,
+            activeVoiceSession,
+            lastError: null,
+          }).catch(() => {});
+        }
+
+        return sendJson(res, 200, { ok: true, ...output });
+      } catch (error) {
+        const code = String(error?.message || error);
+        if (code === "voice_session_not_found") {
+          return sendJson(res, 404, { ok: false, error: code });
+        }
+        throw error;
+      }
+    }
+
     if (req.method === "POST" && url.pathname === "/threads") {
       const body = await readJsonBody(req);
       const agentId = String(body.agentId || "").trim() || null;
@@ -895,6 +1080,16 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+voiceRealtimeServer = createVoiceBridgeRealtimeServer({
+  token,
+  voiceSessionManager,
+  logDiagnostics: writeVoiceDiagnostics,
+});
+
+server.on("upgrade", (req, socket, head) => {
+  voiceRealtimeServer.handleUpgrade(req, socket, head);
+});
+
 server.on("clientError", (error, socket) => {
   socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
   void markError(error?.message || error);
@@ -928,10 +1123,24 @@ if (relayEnabled) {
   const callController = createGatewayCallController({
     relayBaseUrl,
     hostId: relayHostId,
+    loadHub: readHubConfig,
     onAcceptCall: async (call) => {
       activeRelayCall = call;
       await writeRelayState({
         activeCall: call,
+        lastError: null,
+      }).catch(() => {});
+    },
+    onStartVoiceSession: async ({ call, session }) => {
+      activeVoiceSession = await voiceSessionManager.startSession({
+        call,
+        session,
+      });
+      await bindVoiceThreadForCall(call);
+      activeRelayCall = call;
+      await writeRelayState({
+        activeCall: call,
+        activeVoiceSession,
         lastError: null,
       }).catch(() => {});
     },
@@ -976,9 +1185,22 @@ if (relayEnabled) {
   }, 2000);
 
   const runRelayCallPoll = createSerializedRunner(async () => {
+    const previousCallId = activeRelayCall?.callId ?? null;
     activeRelayCall = await callController.tick();
+    if (!activeRelayCall || activeRelayCall.state === "ended" || activeRelayCall.state === "failed") {
+      if (previousCallId) {
+        await voiceSessionManager.endSession(
+          previousCallId,
+          activeRelayCall?.state || "ended",
+        );
+        voiceThreadMemoryStore.unbindCall(previousCallId);
+        voiceRealtimeServer?.closeCall(previousCallId);
+      }
+      activeVoiceSession = null;
+    }
     await writeRelayState({
       activeCall: activeRelayCall,
+      activeVoiceSession,
       lastError: null,
     }).catch(() => {});
   });
@@ -998,6 +1220,7 @@ process.on("SIGTERM", async () => {
   if (relaySyncTimer) clearInterval(relaySyncTimer);
   if (relayTurnTimer) clearInterval(relayTurnTimer);
   if (relayCallTimer) clearInterval(relayCallTimer);
+  voiceRealtimeServer?.close();
   server.close(() => process.exit(0));
 });
 

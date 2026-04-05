@@ -6,6 +6,7 @@ struct ConnectionSheet: View {
     @State private var pairingInput = ""
     @State private var baseURL = ""
     @State private var token = ""
+    @State private var voiceDiagnosticsEnabled = false
     @State private var isShowingDirectForm = false
 
     var body: some View {
@@ -28,8 +29,12 @@ struct ConnectionSheet: View {
                     DirectBridgeCard(
                         baseURL: $baseURL,
                         token: $token,
+                        voiceDiagnosticsEnabled: $voiceDiagnosticsEnabled,
                         isExpanded: $isShowingDirectForm,
                         onUseDefault: { baseURL = BridgeConfig.default.baseURL },
+                        onSetVoiceDiagnostics: { enabled in
+                            store.setVoiceDiagnosticsEnabled(enabled)
+                        },
                         onConnect: connectDirect
                     )
 
@@ -51,6 +56,7 @@ struct ConnectionSheet: View {
                 pairingInput = ""
                 baseURL = store.connectionConfig.directBridge.baseURL
                 token = store.connectionConfig.directBridge.token
+                voiceDiagnosticsEnabled = store.connectionConfig.voiceDiagnostics.enabled
             }
         }
     }
@@ -179,8 +185,10 @@ private struct PairingEntryCard: View {
 private struct DirectBridgeCard: View {
     @Binding var baseURL: String
     @Binding var token: String
+    @Binding var voiceDiagnosticsEnabled: Bool
     @Binding var isExpanded: Bool
     let onUseDefault: () -> Void
+    let onSetVoiceDiagnostics: (Bool) -> Void
     let onConnect: () -> Void
 
     var body: some View {
@@ -189,7 +197,7 @@ private struct DirectBridgeCard: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Advanced")
                         .font(.system(size: 18, weight: .semibold))
-                    Text("Keep direct bridge for local debugging while relay text turn is still landing.")
+                    Text("Keep direct bridge available for local voice transport, diagnostics, and same-Mac debugging.")
                         .font(.system(size: 14))
                         .foregroundStyle(ChatChromePresentation.secondaryTextColor)
                 }
@@ -228,8 +236,25 @@ private struct DirectBridgeCard: View {
                         .background(ChatChromePresentation.inputFillColor, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                         .overlay {
                             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                .stroke(ChatChromePresentation.inputStrokeColor, lineWidth: 1)
+                            .stroke(ChatChromePresentation.inputStrokeColor, lineWidth: 1)
                         }
+
+                    Toggle(isOn: Binding(
+                        get: { voiceDiagnosticsEnabled },
+                        set: { nextValue in
+                            voiceDiagnosticsEnabled = nextValue
+                            onSetVoiceDiagnostics(nextValue)
+                        }
+                    )) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Voice diagnostics")
+                                .font(.system(size: 15, weight: .semibold))
+                            Text("启用后 iPhone 会写本地语音日志，并让桌面 Bridge 同步写入按 callId 关联的链路日志。")
+                                .font(.system(size: 12))
+                                .foregroundStyle(ChatChromePresentation.secondaryTextColor)
+                        }
+                    }
+                    .toggleStyle(.switch)
 
                     HStack {
                         Button("Use default Cloudflare entry", action: onUseDefault)

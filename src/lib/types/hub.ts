@@ -10,6 +10,11 @@ export interface ProviderEndpoint {
 export interface ProviderAudioConfig {
   transcriptionModel?: string;
   realtimeAsrModel?: string;
+  realtimeVoiceModel?: string;
+  realtimeAppId?: string;
+  realtimeAppKey?: string;
+  realtimeToken?: string;
+  realtimeResourceId?: string;
 }
 
 export interface ProviderVisionConfig {
@@ -30,6 +35,8 @@ export interface ModelProvider {
 export interface HubMediaVoiceConfig {
   asrProviderId?: string;
   asrModelId?: string;
+  realtimeProviderId?: string;
+  realtimeModelId?: string;
 }
 
 export interface HubMediaVideoConfig {

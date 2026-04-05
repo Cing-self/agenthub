@@ -28,6 +28,10 @@ test("pairing invite claim flow returns paired hosts for the client", async () =
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         inviteId: "invite_123",
+        directBridge: {
+          urls: ["http://127.0.0.1:18921", "http://192.168.3.80:18921"],
+          token: "ahb_test_123",
+        },
         host: {
           hostId: "host_123",
           displayName: "MacBook Pro",
@@ -59,6 +63,12 @@ test("pairing invite claim flow returns paired hosts for the client", async () =
   );
 
   assert.equal(claimResponse.status, 200);
+  const claimPayload = await readJson(claimResponse);
+  assert.equal(claimPayload.pairing.directBridge.token, "ahb_test_123");
+  assert.deepEqual(claimPayload.pairing.directBridge.urls, [
+    "http://127.0.0.1:18921",
+    "http://192.168.3.80:18921",
+  ]);
 
   const hostsResponse = await worker.fetch(
     new Request("https://relay.example/api/clients/client_ios_1/hosts"),
@@ -158,6 +168,134 @@ test("pairing invite route generates invite defaults when desktop only posts hos
     Date.parse(createInvitePayload.invite.expiresAt) >
       Date.parse(createInvitePayload.invite.createdAt),
   );
+});
+
+test("pairing invite claim returns 404 json when invite code does not exist", async () => {
+  const storage = createMemoryRelayStorage();
+
+  const response = await worker.fetch(
+    new Request("https://relay.example/api/pairing/invites/claim", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        code: "PAIR-MISSING",
+        clientId: "client_ios_missing",
+        claimedAt: "2026-04-03T12:01:00.000Z",
+      }),
+    }),
+    { RELAY_STORAGE: storage },
+  );
+  const payload = await readJson(response);
+
+  assert.equal(response.status, 404);
+  assert.deepEqual(payload, {
+    ok: false,
+    error: "Pairing invite not found",
+  });
+});
+
+test("pairing invite claim returns 409 json when invite is already claimed", async () => {
+  const storage = createMemoryRelayStorage();
+
+  await worker.fetch(
+    new Request("https://relay.example/api/pairing/invites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        inviteId: "invite_conflict",
+        host: {
+          hostId: "host_conflict",
+          displayName: "MacBook Pro",
+          status: "online",
+          lastSeenAt: "2026-04-03T11:59:00.000Z",
+          capabilities: ["turns"],
+        },
+        code: "PAIR-CONFLICT",
+        createdAt: "2026-04-03T12:00:00.000Z",
+        expiresAt: "2026-04-03T12:05:00.000Z",
+      }),
+    }),
+    { RELAY_STORAGE: storage },
+  );
+
+  const firstClaim = await worker.fetch(
+    new Request("https://relay.example/api/pairing/invites/claim", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        code: "PAIR-CONFLICT",
+        clientId: "client_ios_1",
+        claimedAt: "2026-04-03T12:01:00.000Z",
+      }),
+    }),
+    { RELAY_STORAGE: storage },
+  );
+  assert.equal(firstClaim.status, 200);
+
+  const secondClaim = await worker.fetch(
+    new Request("https://relay.example/api/pairing/invites/claim", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        code: "PAIR-CONFLICT",
+        clientId: "client_ios_2",
+        claimedAt: "2026-04-03T12:02:00.000Z",
+      }),
+    }),
+    { RELAY_STORAGE: storage },
+  );
+  const payload = await readJson(secondClaim);
+
+  assert.equal(secondClaim.status, 409);
+  assert.deepEqual(payload, {
+    ok: false,
+    error: "Pairing invite already claimed",
+  });
+});
+
+test("pairing invite claim returns 410 json when invite is expired", async () => {
+  const storage = createMemoryRelayStorage();
+
+  await worker.fetch(
+    new Request("https://relay.example/api/pairing/invites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        inviteId: "invite_expired",
+        host: {
+          hostId: "host_expired",
+          displayName: "MacBook Pro",
+          status: "online",
+          lastSeenAt: "2026-04-03T11:59:00.000Z",
+          capabilities: ["turns"],
+        },
+        code: "PAIR-EXPIRED",
+        createdAt: "2026-04-03T12:00:00.000Z",
+        expiresAt: "2026-04-03T12:00:30.000Z",
+      }),
+    }),
+    { RELAY_STORAGE: storage },
+  );
+
+  const response = await worker.fetch(
+    new Request("https://relay.example/api/pairing/invites/claim", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        code: "PAIR-EXPIRED",
+        clientId: "client_ios_expired",
+        claimedAt: "2026-04-03T12:01:00.000Z",
+      }),
+    }),
+    { RELAY_STORAGE: storage },
+  );
+  const payload = await readJson(response);
+
+  assert.equal(response.status, 410);
+  assert.deepEqual(payload, {
+    ok: false,
+    error: "Pairing invite expired",
+  });
 });
 
 test("host session sync flow returns the latest host sessions", async () => {

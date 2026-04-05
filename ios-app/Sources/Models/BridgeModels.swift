@@ -1,6 +1,46 @@
 import Foundation
 import SwiftUI
+#if canImport(UIKit)
 import UIKit
+private typealias PlatformFont = UIFont
+private typealias PlatformColor = UIColor
+private typealias PlatformFontDescriptor = UIFontDescriptor
+#elseif canImport(AppKit)
+import AppKit
+private typealias PlatformFont = NSFont
+private typealias PlatformColor = NSColor
+private typealias PlatformFontDescriptor = NSFontDescriptor
+#endif
+
+private extension PlatformFont {
+    static func chatSemiboldFont(ofSize size: CGFloat) -> PlatformFont {
+#if canImport(UIKit)
+        return .systemFont(ofSize: size, weight: .semibold)
+#elseif canImport(AppKit)
+        return .boldSystemFont(ofSize: size)
+#endif
+    }
+
+    static func chatItalicFont(ofSize size: CGFloat) -> PlatformFont {
+#if canImport(UIKit)
+        return .italicSystemFont(ofSize: size)
+#elseif canImport(AppKit)
+        let descriptor = NSFontDescriptor.preferredFontDescriptor(forTextStyle: .body)
+            .withSymbolicTraits(.italic)
+        return NSFont(descriptor: descriptor, size: size) ?? .systemFont(ofSize: size)
+#endif
+    }
+}
+
+private extension PlatformColor {
+    static var chatLabelColor: PlatformColor {
+#if canImport(UIKit)
+        return .label
+#elseif canImport(AppKit)
+        return .labelColor
+#endif
+    }
+}
 
 struct BridgeHealth: Decodable {
     let ok: Bool
@@ -86,16 +126,70 @@ struct RelayClientConfig: Codable, Equatable {
     var selectedSessionId: String?
 }
 
+struct VoiceDiagnosticsConfig: Codable, Equatable {
+    var enabled: Bool
+
+    static let `default` = VoiceDiagnosticsConfig(enabled: defaultVoiceDiagnosticsEnabled())
+}
+
 struct MobileConnectionConfig: Codable, Equatable {
     var preferredMode: ConnectionMode
     var directBridge: BridgeConfig
     var relay: RelayClientConfig?
+    var voiceDiagnostics: VoiceDiagnosticsConfig
+
+    private enum CodingKeys: String, CodingKey {
+        case preferredMode
+        case directBridge
+        case relay
+        case voiceDiagnostics
+    }
+
+    init(
+        preferredMode: ConnectionMode,
+        directBridge: BridgeConfig,
+        relay: RelayClientConfig?,
+        voiceDiagnostics: VoiceDiagnosticsConfig = .default
+    ) {
+        self.preferredMode = preferredMode
+        self.directBridge = directBridge
+        self.relay = relay
+        self.voiceDiagnostics = voiceDiagnostics
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        preferredMode = try container.decode(ConnectionMode.self, forKey: .preferredMode)
+        directBridge = try container.decode(BridgeConfig.self, forKey: .directBridge)
+        relay = try container.decodeIfPresent(RelayClientConfig.self, forKey: .relay)
+        voiceDiagnostics = try container.decodeIfPresent(
+            VoiceDiagnosticsConfig.self,
+            forKey: .voiceDiagnostics
+        ) ?? .default
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(preferredMode, forKey: .preferredMode)
+        try container.encode(directBridge, forKey: .directBridge)
+        try container.encodeIfPresent(relay, forKey: .relay)
+        try container.encode(voiceDiagnostics, forKey: .voiceDiagnostics)
+    }
 
     static let `default` = MobileConnectionConfig(
         preferredMode: .relay,
         directBridge: .default,
-        relay: nil
+        relay: nil,
+        voiceDiagnostics: .default
     )
+}
+
+func defaultVoiceDiagnosticsEnabled() -> Bool {
+#if DEBUG
+    return true
+#else
+    return false
+#endif
 }
 
 enum ConnectionProgressStage: Equatable {
@@ -154,6 +248,11 @@ struct RelayPairingClaim: Decodable, Equatable {
     let hostId: String
     let clientId: String
     let claimedAt: String
+    let directBridge: RelayDirectBridgeHint?
+
+    var directBridgeConfigs: [BridgeConfig] {
+        resolveDirectBridgeConfigs(from: directBridge)
+    }
 }
 
 struct RelayPairingClaimResponse: Decodable {
@@ -545,20 +644,26 @@ enum MessagePresentation {
         }
 
         normalizeHTMLAttributes(attributed)
+#if canImport(UIKit)
         return try? AttributedString(attributed, including: \.uiKit)
+#elseif canImport(AppKit)
+        return try? AttributedString(attributed, including: \.appKit)
+#else
+        return nil
+#endif
     }
 
     private static func normalizeHTMLAttributes(_ attributed: NSMutableAttributedString) {
         let fullRange = NSRange(location: 0, length: attributed.length)
 
         attributed.enumerateAttribute(.font, in: fullRange) { value, range, _ in
-            let traits = (value as? UIFont)?.fontDescriptor.symbolicTraits ?? []
-            let replacement: UIFont
+            let traits = (value as? PlatformFont)?.fontDescriptor.symbolicTraits ?? []
+            let replacement: PlatformFont
 
-            if traits.contains(.traitBold) {
-                replacement = .systemFont(ofSize: 16, weight: .semibold)
-            } else if traits.contains(.traitItalic) {
-                replacement = .italicSystemFont(ofSize: 16)
+            if traits.contains(boldFontTrait) {
+                replacement = .chatSemiboldFont(ofSize: 16)
+            } else if traits.contains(italicFontTrait) {
+                replacement = .chatItalicFont(ofSize: 16)
             } else {
                 replacement = .systemFont(ofSize: 16)
             }
@@ -566,7 +671,23 @@ enum MessagePresentation {
             attributed.addAttribute(.font, value: replacement, range: range)
         }
 
-        attributed.addAttribute(.foregroundColor, value: UIColor.label, range: fullRange)
+        attributed.addAttribute(.foregroundColor, value: PlatformColor.chatLabelColor, range: fullRange)
+    }
+
+    private static var boldFontTrait: PlatformFontDescriptor.SymbolicTraits {
+#if canImport(UIKit)
+        return .traitBold
+#elseif canImport(AppKit)
+        return .bold
+#endif
+    }
+
+    private static var italicFontTrait: PlatformFontDescriptor.SymbolicTraits {
+#if canImport(UIKit)
+        return .traitItalic
+#elseif canImport(AppKit)
+        return .italic
+#endif
     }
 
     private static func containsHTML(_ source: String) -> Bool {

@@ -1,11 +1,20 @@
 import Foundation
 
 struct BridgeConfigStore {
-    private let key = "lobster-mobile.bridge-config"
+    private let userDefaults: UserDefaults
+    private let key: String
+
+    init(
+        userDefaults: UserDefaults = .standard,
+        key: String = "lobster-mobile.bridge-config"
+    ) {
+        self.userDefaults = userDefaults
+        self.key = key
+    }
 
     func load() -> MobileConnectionConfig {
         guard
-            let data = UserDefaults.standard.data(forKey: key)
+            let data = userDefaults.data(forKey: key)
         else {
             return .default
         }
@@ -29,6 +38,6 @@ struct BridgeConfigStore {
         guard let data = try? JSONEncoder().encode(config) else {
             return
         }
-        UserDefaults.standard.set(data, forKey: key)
+        userDefaults.set(data, forKey: key)
     }
 }

@@ -106,6 +106,33 @@ test("claimPairingInvite is idempotent for the same client", async () => {
   assert.deepEqual(secondClaim, firstClaim);
 });
 
+test("claimPairingInvite returns direct bridge metadata when invite carries it", async () => {
+  const storage = createMemoryRelayStorage();
+
+  await createPairingInvite(storage, {
+    inviteId: "invite_123",
+    hostId: "host_123",
+    code: "PAIR-123",
+    createdAt: "2026-04-03T12:00:00.000Z",
+    expiresAt: "2026-04-03T12:05:00.000Z",
+    directBridge: {
+      urls: ["http://127.0.0.1:18921", "http://192.168.3.80:18921"],
+      token: "ahb_test_123",
+    },
+  });
+
+  const claim = await claimPairingInvite(storage, {
+    code: "PAIR-123",
+    clientId: "client_ios_1",
+    claimedAt: "2026-04-03T12:01:00.000Z",
+  });
+
+  assert.deepEqual(claim.directBridge, {
+    urls: ["http://127.0.0.1:18921", "http://192.168.3.80:18921"],
+    token: "ahb_test_123",
+  });
+});
+
 test("listPairedHosts returns paired host metadata for a client", async () => {
   const storage = createMemoryRelayStorage();
 
@@ -535,6 +562,9 @@ function createFakeD1Database() {
               if (normalized === "ALTER TABLE RELAY_CALLS ADD COLUMN MEDIA_CONFIG_JSON TEXT") {
                 return { success: true };
               }
+              if (normalized === "ALTER TABLE PAIRING_INVITES ADD COLUMN DIRECT_BRIDGE_JSON TEXT") {
+                return { success: true };
+              }
               if (normalized.startsWith("INSERT INTO HOSTS")) {
                 state.hosts.set(params[0], {
                   hostId: params[0],
@@ -571,6 +601,7 @@ function createFakeD1Database() {
                   code: params[2],
                   createdAt: params[3],
                   expiresAt: params[4],
+                  directBridgeJson: params[5],
                   claimedAt: null,
                   claimedByClientId: null,
                 });

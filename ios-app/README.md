@@ -5,7 +5,7 @@ Current direction:
 - Native SwiftUI app, not a wrapped web view
 - Default onboarding is `pairing + cloud relay`, not manual `Base URL + token`
 - Mobile-first chat surface with a left history drawer
-- Reuses the same local gateway contract that will later carry voice, video, and device-native permissions
+- Relay is the control plane, while the current audio media path still reuses the paired desktop's local bridge
 
 ## What is included
 
@@ -16,12 +16,13 @@ Current direction:
   - paired host list
   - host session list
   - relay text turns with polling-based progress updates
-- Direct bridge client kept as `Advanced` mode for local debugging
+- Voice call controls backed by relay call state and a local realtime WebSocket
+- Direct bridge client kept as `Advanced` mode for local debugging and the current voice media ingress path
 - Local storage for relay pairing state and optional direct bridge config
 
 ## Open and run
 
-1. Open [/Users/caijinhong/Desktop/MyProject/agenthub/.worktrees/codex-agenthub-relay-v1/ios-app/LobsterMobile.xcodeproj](/Users/caijinhong/Desktop/MyProject/agenthub/.worktrees/codex-agenthub-relay-v1/ios-app/LobsterMobile.xcodeproj) in Xcode
+1. Open `ios-app/LobsterMobile.xcodeproj` in Xcode
 2. Select the `LobsterMobile` scheme
 3. Choose an iPhone simulator or a real device
 4. Press Run
@@ -46,9 +47,45 @@ On first launch, the app opens the connection sheet and expects a desktop pairin
 2. In `Remote Hosts`, configure the relay URL and start `Remote Mode`
 3. Generate a pairing invite
 4. Paste the pairing link into the iOS app
-5. The app will load `Hosts -> Sessions -> Chat`
+5. The app claims the host and stores relay identity plus any direct bridge hint carried by the pairing payload
+6. The app will load `Hosts -> Sessions -> Chat`
 
 `Advanced` mode still exposes direct bridge fields for local debugging on the same Mac.
+
+## Voice call operator flow
+
+The current voice slice is:
+
+`iPhone mic -> local /calls/:callId/realtime websocket -> desktop gateway voice session -> Volcengine realtime`
+
+Relay still owns pairing, host discovery, session selection, and call signaling. Audio ingress is not fully relay-native yet, so the phone still needs a reachable direct bridge base URL and token for the selected desktop.
+
+### Required desktop setup
+
+1. In AgentHub desktop `Models`, configure the Volcengine provider audio fields:
+   - `realtimeVoiceModel`
+   - `realtimeAppId`
+   - `realtimeAppKey`
+   - `realtimeToken`
+   - `realtimeResourceId`
+2. In the same page, set `Hub media -> Voice -> realtimeProviderId` and `realtimeModelId`.
+3. In `Remote Hosts`, start `Remote Mode` and verify the host is online before pairing.
+
+### Starting a voice call
+
+1. Pair the phone from `Remote Hosts`.
+2. If the pairing payload did not fill the direct bridge base URL or token automatically, open `Advanced` in the iOS connection sheet and enter them manually.
+3. Optionally enable `Voice diagnostics` in `Advanced` before connecting.
+4. Open a host and session, then start a voice call from chat.
+5. On the desktop, `Remote Hosts` should show an active call plus a `Realtime Voice Session` card with chunk counters, provider state, transcript, and assistant text.
+6. After the provider emits final transcript and final reply text, the bound AgentHub thread should receive one user transcript message and one assistant reply message.
+
+### Troubleshooting
+
+- If `Realtime Voice Session` shows `missing config`, fill the missing provider fields in `Models`.
+- If the iPhone cannot reach the audio ingress path, replace the direct bridge URL in `Advanced` with a LAN-reachable address for the same desktop bridge.
+- If the app falls back away from realtime WebSocket transport, enable `Voice diagnostics` and inspect the desktop `Remote Hosts -> Recent Logs` panel.
+- The default desktop bridge log file is `~/.agenthub/logs/remote-bridge.log`.
 
 ## Run on a real iPhone
 

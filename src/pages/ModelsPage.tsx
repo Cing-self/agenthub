@@ -6,16 +6,16 @@ import {
 import { cn } from "@/lib/utils";
 import { useHubStore } from "@/stores/hub-store";
 import { PROVIDER_PRESETS, MODEL_PRESETS } from "@/lib/types/hub";
-import type { ModelProvider, Model } from "@/lib/types/hub";
+import type { ModelProvider, Model, HubMediaConfig } from "@/lib/types/hub";
 import { toast } from "sonner";
 
 type Tab = "providers" | "models";
 
 export default function ModelsPage() {
   const {
-    providers, models, loading, dirty, saving, lastSaved,
+    providers, models, media, loading, dirty, saving, lastSaved,
     loadHub, addProvider, updateProvider, removeProvider,
-    addModel, removeModel, toggleModel, saveHub,
+    addModel, removeModel, toggleModel, saveHub, updateMedia,
   } = useHubStore();
 
   const [tab, setTab] = useState<Tab>("providers");
@@ -136,6 +136,7 @@ export default function ModelsPage() {
       {/* ── Providers Tab ── */}
       {tab === "providers" && (
         <div className="space-y-3">
+          <MediaDefaultsCard media={media} providers={providers} models={models} onUpdate={updateMedia} />
 
           {providers.length === 0 ? (
             <Empty icon={<Globe size={28} />} text="No providers configured" sub="Add a provider to connect to model APIs" />
@@ -145,6 +146,7 @@ export default function ModelsPage() {
                 key={p.id} provider={p}
                 expanded={expandedId === p.id}
                 showKey={showKeyMap[p.id] || false}
+                models={models}
                 onToggle={() => setExpandedId(expandedId === p.id ? null : p.id)}
                 onToggleKey={() => setShowKeyMap((m) => ({ ...m, [p.id]: !m[p.id] }))}
                 onUpdate={(u) => updateProvider(p.id, u)}
@@ -368,11 +370,19 @@ function ModelsListWithFilters({ models, providers, toggleModel, removeModel }: 
 
 // ── Sub-components ──
 
-function ProviderCard({ provider, expanded, showKey, onToggle, onToggleKey, onUpdate, onRemove, modelCount, onFetchModels }: {
+function ProviderCard({ provider, models, expanded, showKey, onToggle, onToggleKey, onUpdate, onRemove, modelCount, onFetchModels }: {
   provider: ModelProvider; expanded: boolean; showKey: boolean; modelCount: number;
+  models: Model[];
   onToggle: () => void; onToggleKey: () => void; onUpdate: (u: Partial<ModelProvider>) => void; onRemove: () => void;
   onFetchModels: () => void;
 }) {
+  const providerModelIds = [
+    ...new Set(
+      models
+        .filter((item) => item.providerIds.includes(provider.id))
+        .map((item) => item.id),
+    ),
+  ];
   const hasKey = provider.apiKey.length > 0;
   const endpoints = provider.endpoints || [];
   const primaryDomain = endpoints[0]?.baseUrl?.replace(/^https?:\/\//, "").split("/")[0] || "";
@@ -405,18 +415,31 @@ function ProviderCard({ provider, expanded, showKey, onToggle, onToggleKey, onUp
         <span className="text-xs text-muted-foreground">{modelCount} models</span>
         <button onClick={(e) => { e.stopPropagation(); onRemove(); }} className="text-muted-foreground hover:text-red-400 p-1"><Trash2 size={13} /></button>
       </button>
-      {expanded && (
-        <div className="border-t border-border p-4 space-y-3">
+	      {expanded && (
+	        <div className="border-t border-border p-4 space-y-3">
           <Field label="Name"><input type="text" value={provider.name} onChange={(e) => onUpdate({ name: e.target.value })} className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm" /></Field>
           <Field label="API Key">
-            <div className="flex gap-2">
-              <input type={showKey ? "text" : "password"} value={provider.apiKey} onChange={(e) => onUpdate({ apiKey: e.target.value })} placeholder="sk-..." className="flex-1 rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono" />
-              <button onClick={onToggleKey} className="rounded-md border border-input px-2 hover:bg-accent">{showKey ? <EyeOff size={14} /> : <Eye size={14} />}</button>
+            <div className="space-y-2">
+              <div className="flex gap-2">
+                <input
+                  type={showKey ? "text" : "password"}
+                  value={provider.apiKey}
+                  onChange={(e) => onUpdate({ apiKey: e.target.value })}
+                  placeholder={provider.id === "volcengine" ? "方舟 Ark API Key" : "sk-..."}
+                  className="flex-1 rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono"
+                />
+                <button onClick={onToggleKey} className="rounded-md border border-input px-2 hover:bg-accent">{showKey ? <EyeOff size={14} /> : <Eye size={14} />}</button>
+              </div>
+              {provider.id === "volcengine" && (
+                <p className="text-[11px] text-muted-foreground">
+                  这里填方舟 OpenAI/Anthropic 兼容接口的 API Key。实时语音的 App Key 在下方 Audio 区域单独配置。
+                </p>
+              )}
             </div>
           </Field>
 
           {/* Endpoints list */}
-          <Field label={`Endpoints (${endpoints.length})`}>
+	          <Field label={`Endpoints (${endpoints.length})`}>
             <div className="space-y-2">
               {endpoints.map((ep, i) => (
                 <div key={i} className="flex items-center gap-2 rounded-md border border-border p-2.5 bg-muted/20">
@@ -456,11 +479,157 @@ function ProviderCard({ provider, expanded, showKey, onToggle, onToggleKey, onUp
               >
                 <Plus size={12} /> Add endpoint
               </button>
-            </div>
-          </Field>
+	            </div>
+	          </Field>
 
-          {hasKey && (
-            <button
+              <Field label="Audio">
+                <div className="space-y-2">
+                  <SubField label="Transcription Model">
+                    <input
+                      type="text"
+                      list={`provider-models-${provider.id}`}
+                      value={provider.audio?.transcriptionModel || ""}
+                      onChange={(event) =>
+                        onUpdate({
+                          audio: compactProviderAudioDraft(provider, {
+                            transcriptionModel: event.target.value,
+                          }),
+                        })
+                      }
+                      placeholder="例如 doubao-asr-realtime-preview"
+                      className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono"
+                    />
+                  </SubField>
+                  <SubField label="Realtime ASR Model">
+                    <input
+                      type="text"
+                      list={`provider-models-${provider.id}`}
+                      value={provider.audio?.realtimeAsrModel || ""}
+                      onChange={(event) =>
+                        onUpdate({
+                          audio: compactProviderAudioDraft(provider, {
+                            realtimeAsrModel: event.target.value,
+                          }),
+                        })
+                      }
+                      placeholder="例如 doubao-asr-streaming-v2"
+                      className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono"
+                    />
+                  </SubField>
+                  <SubField label="Realtime Voice Model">
+                    <input
+                      type="text"
+                      list={`provider-models-${provider.id}`}
+                      value={provider.audio?.realtimeVoiceModel || ""}
+                      onChange={(event) =>
+                        onUpdate({
+                          audio: compactProviderAudioDraft(provider, {
+                            realtimeVoiceModel: event.target.value,
+                          }),
+                        })
+                      }
+                      placeholder="例如 doubao-realtime-voice"
+                      className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono"
+                    />
+                  </SubField>
+                  <SubField label="Realtime App ID">
+                    <input
+                      type="text"
+                      value={provider.audio?.realtimeAppId || ""}
+                      onChange={(event) =>
+                        onUpdate({
+                          audio: compactProviderAudioDraft(provider, {
+                            realtimeAppId: event.target.value,
+                          }),
+                        })
+                      }
+                      placeholder="火山引擎 AppID"
+                      className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono"
+                    />
+                  </SubField>
+                  <SubField label="Realtime Secret Key (App Key)">
+                    <input
+                      type="password"
+                      value={provider.audio?.realtimeAppKey || ""}
+                      onChange={(event) =>
+                        onUpdate({
+                          audio: compactProviderAudioDraft(provider, {
+                            realtimeAppKey: event.target.value,
+                          }),
+                        })
+                      }
+                      placeholder="火山引擎实时语音 Secret Key"
+                      className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono"
+                    />
+                  </SubField>
+                  <SubField label="Realtime Token">
+                    <input
+                      type="password"
+                      value={provider.audio?.realtimeToken || ""}
+                      onChange={(event) =>
+                        onUpdate({
+                          audio: compactProviderAudioDraft(provider, {
+                            realtimeToken: event.target.value,
+                          }),
+                        })
+                      }
+                      placeholder="火山引擎 TOKEN"
+                      className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono"
+                    />
+                  </SubField>
+                  <SubField label="Realtime Resource ID">
+                    <input
+                      type="text"
+                      value={provider.audio?.realtimeResourceId || ""}
+                      onChange={(event) =>
+                        onUpdate({
+                          audio: compactProviderAudioDraft(provider, {
+                            realtimeResourceId: event.target.value,
+                          }),
+                        })
+                      }
+                      placeholder="例如 volc.speech.dialog"
+                      className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono"
+                    />
+                  </SubField>
+                  <p className="text-[11px] text-muted-foreground">
+                    这些字段只覆盖录音转写和端到端实时语音入口。Volcengine 这里要填控制台里的 APP ID / Secret Key / Access Token / Resource ID，不是顶部 Ark API Key。
+                  </p>
+                </div>
+              </Field>
+
+              <Field label="Vision">
+                <div className="space-y-2">
+                  <SubField label="Reasoning Model">
+                    <input
+                      type="text"
+                      list={`provider-models-${provider.id}`}
+                      value={provider.vision?.reasoningModel || ""}
+                      onChange={(event) =>
+                        onUpdate({
+                          vision: compactProviderVisionDraft(provider, {
+                            reasoningModel: event.target.value,
+                          }),
+                        })
+                      }
+                      placeholder="例如 gemini-2.5-flash"
+                      className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono"
+                    />
+                  </SubField>
+                  <p className="text-[11px] text-muted-foreground">
+                    用于视频理解 / camera-share 等媒体链，不会自动改动文字聊天默认模型。
+                  </p>
+                </div>
+              </Field>
+
+	              <datalist id={`provider-models-${provider.id}`}>
+	                {providerModelIds.map((modelId) => (
+	                  <option key={`model-${provider.id}-${modelId}`} value={modelId} />
+	                ))}
+	              </datalist>
+
+	          {hasKey && (
+	            <button
               onClick={onFetchModels}
               className="flex items-center gap-2 rounded-md bg-primary/10 text-primary px-3 py-2 text-sm hover:bg-primary/20 transition-colors w-full justify-center font-medium"
             >
@@ -472,6 +641,190 @@ function ProviderCard({ provider, expanded, showKey, onToggle, onToggleKey, onUp
       )}
     </div>
   );
+}
+
+function MediaDefaultsCard({
+  media,
+  providers,
+  models,
+  onUpdate,
+}: {
+  media: HubMediaConfig | null;
+  providers: ModelProvider[];
+  models: Model[];
+  onUpdate: (media: HubMediaConfig | null) => void;
+}) {
+  const providerIds = providers.map((provider) => provider.id);
+  const modelIds = models.map((model) => model.id);
+
+  return (
+    <div className="rounded-lg border border-border bg-card p-4 space-y-3">
+      <div>
+        <div className="text-sm font-medium">Media Defaults</div>
+        <p className="mt-1 text-[11px] text-muted-foreground">
+          这些默认值会写到 `hub.media`，给 relay host、语音链和后续视频链作为默认 provider/model 选择。
+        </p>
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2">
+        <Field label="Voice Provider">
+          <input
+            type="text"
+            list="hub-provider-ids"
+            value={media?.voice?.asrProviderId || ""}
+            onChange={(event) =>
+              onUpdate({
+                ...(media ?? {}),
+                voice: {
+                  ...(media?.voice ?? {}),
+                  asrProviderId: event.target.value,
+                },
+              })
+            }
+            placeholder="例如 volcengine"
+            className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono"
+          />
+        </Field>
+        <Field label="Voice Model">
+          <input
+            type="text"
+            list="hub-model-ids"
+            value={media?.voice?.asrModelId || ""}
+            onChange={(event) =>
+              onUpdate({
+                ...(media ?? {}),
+                voice: {
+                  ...(media?.voice ?? {}),
+                  asrModelId: event.target.value,
+                },
+              })
+            }
+            placeholder="例如 doubao-asr-streaming-v2"
+            className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono"
+          />
+        </Field>
+        <Field label="Realtime Voice Provider">
+          <input
+            type="text"
+            list="hub-provider-ids"
+            value={media?.voice?.realtimeProviderId || ""}
+            onChange={(event) =>
+              onUpdate({
+                ...(media ?? {}),
+                voice: {
+                  ...(media?.voice ?? {}),
+                  realtimeProviderId: event.target.value,
+                },
+              })
+            }
+            placeholder="例如 volcengine"
+            className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono"
+          />
+        </Field>
+        <Field label="Realtime Voice Model">
+          <input
+            type="text"
+            list="hub-model-ids"
+            value={media?.voice?.realtimeModelId || ""}
+            onChange={(event) =>
+              onUpdate({
+                ...(media ?? {}),
+                voice: {
+                  ...(media?.voice ?? {}),
+                  realtimeModelId: event.target.value,
+                },
+              })
+            }
+            placeholder="例如 doubao-realtime-voice"
+            className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono"
+          />
+        </Field>
+        <Field label="Video Provider">
+          <input
+            type="text"
+            list="hub-provider-ids"
+            value={media?.video?.reasoningProviderId || ""}
+            onChange={(event) =>
+              onUpdate({
+                ...(media ?? {}),
+                video: {
+                  ...(media?.video ?? {}),
+                  reasoningProviderId: event.target.value,
+                },
+              })
+            }
+            placeholder="例如 googleapis"
+            className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono"
+          />
+        </Field>
+        <Field label="Video Model">
+          <input
+            type="text"
+            list="hub-model-ids"
+            value={media?.video?.reasoningModelId || ""}
+            onChange={(event) =>
+              onUpdate({
+                ...(media ?? {}),
+                video: {
+                  ...(media?.video ?? {}),
+                  reasoningModelId: event.target.value,
+                },
+              })
+            }
+            placeholder="例如 gemini-2.5-flash"
+            className="w-full rounded-md border border-input bg-background px-3 py-1.5 text-sm font-mono"
+          />
+        </Field>
+      </div>
+
+      <datalist id="hub-provider-ids">
+        {providerIds.map((providerId) => (
+          <option key={providerId} value={providerId} />
+        ))}
+      </datalist>
+      <datalist id="hub-model-ids">
+        {modelIds.map((modelId) => (
+          <option key={modelId} value={modelId} />
+        ))}
+      </datalist>
+    </div>
+  );
+}
+
+function compactProviderAudioDraft(
+  provider: ModelProvider,
+  updates: Partial<NonNullable<ModelProvider["audio"]>>,
+) {
+  const next = {
+    transcriptionModel: updates.transcriptionModel ?? provider.audio?.transcriptionModel ?? "",
+    realtimeAsrModel: updates.realtimeAsrModel ?? provider.audio?.realtimeAsrModel ?? "",
+    realtimeVoiceModel: updates.realtimeVoiceModel ?? provider.audio?.realtimeVoiceModel ?? "",
+    realtimeAppId: updates.realtimeAppId ?? provider.audio?.realtimeAppId ?? "",
+    realtimeAppKey: updates.realtimeAppKey ?? provider.audio?.realtimeAppKey ?? "",
+    realtimeToken: updates.realtimeToken ?? provider.audio?.realtimeToken ?? "",
+    realtimeResourceId: updates.realtimeResourceId ?? provider.audio?.realtimeResourceId ?? "",
+  };
+
+  return next.transcriptionModel.trim() ||
+    next.realtimeAsrModel.trim() ||
+    next.realtimeVoiceModel.trim() ||
+    next.realtimeAppId.trim() ||
+    next.realtimeAppKey.trim() ||
+    next.realtimeToken.trim() ||
+    next.realtimeResourceId.trim()
+    ? next
+    : undefined;
+}
+
+function compactProviderVisionDraft(
+  provider: ModelProvider,
+  updates: Partial<NonNullable<ModelProvider["vision"]>>,
+) {
+  const next = {
+    reasoningModel: updates.reasoningModel ?? provider.vision?.reasoningModel ?? "",
+  };
+
+  return next.reasoningModel.trim() ? next : undefined;
 }
 
 function Dialog({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
@@ -500,4 +853,13 @@ function Empty({ icon, text, sub }: { icon: React.ReactNode; text: string; sub: 
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return <div><label className="text-xs text-muted-foreground mb-1 block">{label}</label>{children}</div>;
+}
+
+function SubField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="mb-1 block text-[11px] text-muted-foreground/80">{label}</label>
+      {children}
+    </div>
+  );
 }

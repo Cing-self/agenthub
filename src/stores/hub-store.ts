@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import type { ModelProvider, Model, McpServer } from "@/lib/types/hub";
+import type { ModelProvider, Model, McpServer, HubMediaConfig } from "@/lib/types/hub";
+import { compactHubMediaConfig, compactProviderConfig, normalizeHubConfigState } from "@/lib/hub/config-state.js";
 
 let autoSaveTimer: ReturnType<typeof setTimeout> | null = null;
 const AUTO_SAVE_DELAY = 1500; // ms
@@ -22,6 +23,7 @@ interface HubState {
   providers: ModelProvider[];
   models: Model[];
   mcpServers: McpServer[];
+  media: HubMediaConfig | null;
   loading: boolean;
   dirty: boolean;
   saving: boolean;
@@ -32,6 +34,7 @@ interface HubState {
   addProvider: (provider: ModelProvider) => void;
   updateProvider: (id: string, updates: Partial<ModelProvider>) => void;
   removeProvider: (id: string) => void;
+  updateMedia: (media: HubMediaConfig | null) => void;
 
   addModel: (model: Model) => void;
   updateModel: (id: string, updates: Partial<Model>) => void;
@@ -51,6 +54,7 @@ export const useHubStore = create<HubState>((set, get) => ({
   providers: [],
   models: [],
   mcpServers: [],
+  media: null,
   loading: true,
   dirty: false,
   saving: false,
@@ -61,53 +65,21 @@ export const useHubStore = create<HubState>((set, get) => ({
     try {
       const { invoke } = await import("@tauri-apps/api/core");
       const hub = await invoke<Record<string, unknown>>("read_hub_config");
-      let providers: ModelProvider[] = [];
-      let models: Model[] = [];
-
-      const rawProviders = Array.isArray(hub?.providers)
-        ? (hub.providers as Record<string, unknown>[])
-        : hub?.models && typeof hub.models === "object" && !Array.isArray(hub.models)
-          ? ((hub.models as Record<string, unknown>).providers as Record<string, unknown>[]) || []
-          : [];
-
-      providers = rawProviders.map((p) => {
-        if (Array.isArray(p.endpoints)) {
-          return p as unknown as ModelProvider;
-        }
-        return {
-          id: p.id as string,
-          name: p.name as string,
-          apiKey: (p.apiKey as string) || "",
-          endpoints: [{
-            baseUrl: (p.baseUrl as string) || "",
-            apiType: (p.apiType as "openai" | "anthropic") || "openai",
-          }],
-        } as ModelProvider;
-      });
-
-      if (Array.isArray(hub?.models)) {
-        models = hub.models as Model[];
-      }
-
-      let mcpServers: McpServer[] = [];
-      if (Array.isArray(hub?.mcpServers)) {
-        mcpServers = hub.mcpServers as McpServer[];
-      }
-
-      set({ providers, models, mcpServers, loading: false, dirty: false });
+      const { providers, models, mcpServers, media } = normalizeHubConfigState(hub);
+      set({ providers, models, mcpServers, media, loading: false, dirty: false });
     } catch {
-      set({ providers: [], models: [], mcpServers: [], loading: false, dirty: false });
+      set({ providers: [], models: [], mcpServers: [], media: null, loading: false, dirty: false });
     }
   },
 
   addProvider: (provider) => {
-    set((s) => ({ providers: [...s.providers, provider], dirty: true }));
+    set((s) => ({ providers: [...s.providers, compactProviderConfig(provider)], dirty: true }));
     scheduleAutoSave();
   },
 
   updateProvider: (id, updates) => {
     set((s) => ({
-      providers: s.providers.map((p) => (p.id === id ? { ...p, ...updates } : p)),
+      providers: s.providers.map((p) => (p.id === id ? compactProviderConfig({ ...p, ...updates }) : p)),
       dirty: true,
     }));
     scheduleAutoSave();
@@ -115,6 +87,11 @@ export const useHubStore = create<HubState>((set, get) => ({
 
   removeProvider: (id) => {
     set((s) => ({ providers: s.providers.filter((p) => p.id !== id), dirty: true }));
+    scheduleAutoSave();
+  },
+
+  updateMedia: (media) => {
+    set({ media: compactHubMediaConfig(media), dirty: true });
     scheduleAutoSave();
   },
 
@@ -171,13 +148,14 @@ export const useHubStore = create<HubState>((set, get) => ({
   },
 
   saveHub: async () => {
-    const { providers, models, mcpServers } = get();
+    const { providers, models, mcpServers, media } = get();
     set({ saving: true });
     try {
       const { invoke } = await import("@tauri-apps/api/core");
-      await invoke("write_hub_config_module", { module: "providers", data: providers });
+      await invoke("write_hub_config_module", { module: "providers", data: providers.map(compactProviderConfig) });
       await invoke("write_hub_config_module", { module: "models", data: models });
       await invoke("write_hub_config_module", { module: "mcpServers", data: mcpServers });
+      await invoke("write_hub_config_module", { module: "media", data: compactHubMediaConfig(media) });
       set({ dirty: false, saving: false, lastSaved: new Date() });
     } catch (err) {
       set({ saving: false });

@@ -17,6 +17,31 @@ enum RelayPairingPayloadError: LocalizedError {
     }
 }
 
+struct RelayDirectBridgeHint: Codable, Equatable {
+    let urls: [String]
+    let token: String
+}
+
+func resolveDirectBridgeConfigs(from directBridge: RelayDirectBridgeHint?) -> [BridgeConfig] {
+    guard let directBridge else {
+        return []
+    }
+
+    let ranked = directBridge.urls
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+        .reduce(into: [String]()) { partialResult, url in
+            if !partialResult.contains(url) {
+                partialResult.append(url)
+            }
+        }
+        .sorted { lhs, rhs in
+            directBridgeSortRank(lhs) < directBridgeSortRank(rhs)
+        }
+
+    return ranked.map { BridgeConfig(baseURL: $0, token: directBridge.token) }
+}
+
 struct RelayPairingPayload: Codable, Equatable {
     let v: Int
     let relayBaseURL: String
@@ -24,6 +49,7 @@ struct RelayPairingPayload: Codable, Equatable {
     let inviteId: String
     let code: String
     let expiresAt: String
+    let directBridge: RelayDirectBridgeHint?
 
     private enum CodingKeys: String, CodingKey {
         case v
@@ -32,6 +58,11 @@ struct RelayPairingPayload: Codable, Equatable {
         case inviteId
         case code
         case expiresAt
+        case directBridge
+    }
+
+    var directBridgeConfigs: [BridgeConfig] {
+        resolveDirectBridgeConfigs(from: directBridge)
     }
 
     static func parse(from input: String) throws -> RelayPairingPayload {
@@ -69,6 +100,40 @@ struct RelayPairingPayload: Codable, Equatable {
 
         return payload
     }
+}
+
+private func directBridgeSortRank(_ baseURL: String) -> Int {
+    guard let host = URL(string: baseURL)?.host?.lowercased() else {
+        return 3
+    }
+
+    if host == "127.0.0.1" || host == "localhost" || host == "::1" {
+        return 2
+    }
+    if host.hasPrefix("169.254.") || host.hasPrefix("198.18.") {
+        return 1
+    }
+    return 0
+}
+
+func shouldFallbackToDirectBridge(_ error: Error) -> Bool {
+    if let urlError = error as? URLError {
+        switch urlError.code {
+        case .timedOut, .networkConnectionLost, .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
+            return true
+        default:
+            return false
+        }
+    }
+
+    let message = error.localizedDescription.lowercased()
+    guard message.contains("relay") else {
+        return false
+    }
+
+    return message.contains("请求超时")
+        || message.contains("地址无法连接")
+        || message.contains("连接失败")
 }
 
 struct RelayHost: Codable, Equatable, Hashable, Identifiable {
@@ -117,6 +182,18 @@ enum RelayCallState: String, Codable, Equatable, Hashable {
     case live
     case ended
     case failed
+}
+
+func shouldPlayCallConnectedCue(previous: RelayCallSummary?, next: RelayCallSummary?) -> Bool {
+    guard let next, next.state == .live else {
+        return false
+    }
+
+    guard previous?.callId == next.callId else {
+        return true
+    }
+
+    return previous?.state != .live
 }
 
 struct RelayModelSelection: Codable, Equatable, Hashable {

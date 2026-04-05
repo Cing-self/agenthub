@@ -7,7 +7,9 @@ import remarkGfm from "remark-gfm";
 import { Loader2, Mic, Pause, Play, Volume2, VolumeX } from "lucide-react";
 import { toast } from "sonner";
 import { MessageBlocksRenderer } from "@/components/chat/MessageBlocksRenderer";
+import { extractFileRefs, filterMeaningfulFileRefs } from "@/lib/chat/file-refs.js";
 import { parseMessageContent } from "@/lib/chat/message-blocks";
+import { isNearBottom } from "@/lib/chat/scroll-position.js";
 import { getRuntimeAdapter, getRuntimeSessionMode, usesNativeRuntimeSession } from "@/lib/runtime";
 import type { MessagePart, RuntimeMessageMetadata } from "@/lib/types/chat";
 import type { RuntimeStreamEvent } from "@/lib/runtime/types";
@@ -131,13 +133,14 @@ function formatContextPrompt(
   taskTitles: string[],
   includeRecentContext: boolean,
 ) {
+  const keyFiles = filterMeaningfulFileRefs(packet.key_files);
   const sections = [
     packet.summary ? `共享备注：\n${packet.summary}` : "",
     includeRecentContext && packet.recent_context.length
       ? `最近往来：\n- ${packet.recent_context.join("\n- ")}`
       : "",
     packet.open_questions.length ? `未解决问题：\n- ${packet.open_questions.join("\n- ")}` : "",
-    packet.key_files.length ? `关键文件：\n- ${packet.key_files.join("\n- ")}` : "",
+    keyFiles.length ? `关键文件：\n- ${keyFiles.join("\n- ")}` : "",
     taskTitles.length ? `当前相关子任务：\n- ${taskTitles.join("\n- ")}` : "",
     `用户消息：\n${packet.latest_user_message}`,
   ]
@@ -164,14 +167,6 @@ function compactText(text: string, maxLength: number) {
   return `${normalized.slice(0, maxLength).trim()}...`;
 }
 
-function extractFileRefs(...texts: string[]) {
-  const pattern = /(?:\/[\w.-]+)+\/[\w.-]+|(?:[\w.-]+\/)+[\w.-]+\.[a-zA-Z0-9]+/g;
-  const refs = texts
-    .flatMap((text) => text.match(pattern) ?? [])
-    .filter((item) => item.length > 3);
-  return Array.from(new Set(refs)).slice(0, 6);
-}
-
 function buildBoardUpdate(
   board: TaskBoard,
   params: {
@@ -180,9 +175,10 @@ function buildBoardUpdate(
   },
 ) {
   const userSnippet = compactText(params.userContent, 72);
-  const mergedFiles = Array.from(
-    new Set([...board.key_files, ...extractFileRefs(params.userContent, params.response)]),
-  ).slice(0, 8);
+  const mergedFiles = filterMeaningfulFileRefs([
+    ...board.key_files,
+    ...extractFileRefs(params.userContent, params.response),
+  ]).slice(0, 8);
 
   return {
     ...board,
@@ -430,6 +426,7 @@ export default function ChatPage() {
   const voiceAutoSendRef = useRef(false);
   const voicePendingReplyRef = useRef(false);
   const lastSpokenMessageIdRef = useRef<string | null>(null);
+  const shouldStickToBottomRef = useRef(true);
 
   const {
     supported: voiceInputSupported,
@@ -500,8 +497,14 @@ export default function ChatPage() {
   }, [currentBundle?.thread.id, selectThread, selectedThreadId, storeSelectedThreadId]);
 
   useEffect(() => {
+    shouldStickToBottomRef.current = true;
+    messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
+  }, [selectedThreadId]);
+
+  useEffect(() => {
+    if (!shouldStickToBottomRef.current) return;
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, selectedThreadId]);
+  }, [messages]);
 
   useEffect(() => {
     if (!voiceError) return;
@@ -673,6 +676,7 @@ export default function ChatPage() {
     const displayText = (payload.displayText ?? payload.runtimeText).trim();
     const threadSeed = runtimeText || displayText;
     if (!runtimeText || !selectedAgentId || sending) return;
+    shouldStickToBottomRef.current = true;
     const switchCommand = payload.audioClip ? null : parseAgentSwitchCommand(runtimeText);
     if (switchCommand) {
       const nextAgent = findAgentByCommand(switchCommand.target, visibleAgents);
@@ -996,7 +1000,17 @@ export default function ChatPage() {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col">
-        <div className="flex-1 min-h-0 space-y-3 overflow-y-auto pb-3">
+        <div
+          onScroll={(event) => {
+            const viewport = event.currentTarget;
+            shouldStickToBottomRef.current = isNearBottom({
+              scrollTop: viewport.scrollTop,
+              clientHeight: viewport.clientHeight,
+              scrollHeight: viewport.scrollHeight,
+            });
+          }}
+          className="flex-1 min-h-0 space-y-3 overflow-y-auto pb-3"
+        >
           {messages.length === 0 && (
             <div className="flex h-full flex-col items-center justify-center gap-2 text-muted-foreground">
               <span className="text-2xl">{agent?.icon || "💬"}</span>

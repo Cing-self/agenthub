@@ -35,6 +35,17 @@ struct RootChatView: View {
                     )
                 }
 
+                if let microphonePermissionPrompt = store.microphonePermissionPrompt {
+                    MicrophonePermissionCard(
+                        prompt: microphonePermissionPrompt,
+                        onAction: {
+                            Task {
+                                await store.resolveMicrophonePermissionPromptAction()
+                            }
+                        }
+                    )
+                }
+
                 TimelinePane(
                     store: store,
                     onBackgroundTap: dismissComposerFromSurfaceTap
@@ -83,15 +94,21 @@ struct RootChatView: View {
         .task {
             guard !didRunStartup else { return }
             didRunStartup = true
+            appendVoiceDebugLog("rootchat:startup")
+            await store.primeMicrophonePermissionPromptIfNeeded()
 
             let hasRelay = store.connectionConfig.relay != nil
             let hasDirect = !store.connectionConfig.directBridge.token.isEmpty
+            appendVoiceDebugLog("rootchat:connection-config hasRelay=\(hasRelay) hasDirect=\(hasDirect)")
             guard hasRelay || hasDirect else {
+                appendVoiceDebugLog("rootchat:show-connection-sheet reason=no-config")
                 store.isShowingConnectionSheet = true
                 return
             }
 
+            appendVoiceDebugLog("rootchat:connect begin")
             await store.connect()
+            appendVoiceDebugLog("rootchat:connect end")
         }
     }
 
@@ -181,6 +198,39 @@ struct RootChatView: View {
 
         isComposerFocused = false
         UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+    }
+}
+
+private struct MicrophonePermissionCard: View {
+    let prompt: ChatStore.MicrophonePermissionPrompt
+    let onAction: () -> Void
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "mic.slash.fill")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(.orange)
+                .frame(width: 38, height: 38)
+                .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(prompt.title)
+                    .font(.system(size: 17, weight: .semibold))
+                Text(prompt.message)
+                    .font(.system(size: 13))
+                    .foregroundStyle(ChatChromePresentation.secondaryTextColor)
+            }
+
+            Spacer(minLength: 12)
+
+            Button(prompt.actionTitle, action: onAction)
+                .buttonStyle(.plain)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(ChatChromePresentation.surfaceColor, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
     }
 }
 

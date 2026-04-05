@@ -77,6 +77,12 @@ struct ResolvedTranscriptionTarget {
     model: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TranscriptionUploadFormat {
+    file_extension: &'static str,
+    content_type: &'static str,
+}
+
 #[derive(Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 struct HubMediaVoiceConfig {
@@ -274,6 +280,21 @@ fn resolve_transcription_target(
     resolve_transcription_target_from_hub_config(&providers, media_config.as_ref(), provider_id, model_id)
 }
 
+fn transcription_upload_format_for_provider(provider_id: &str) -> TranscriptionUploadFormat {
+    if provider_id == "volcengine" {
+        // Volcengine's OpenAI-compatible Doubao ASR currently expects raw pcm_s16le input.
+        return TranscriptionUploadFormat {
+            file_extension: "pcm",
+            content_type: "audio/pcm",
+        };
+    }
+
+    TranscriptionUploadFormat {
+        file_extension: "mp3",
+        content_type: "audio/mpeg",
+    }
+}
+
 fn resolve_openai_endpoint(provider: &ProviderConfig) -> Option<String> {
     if let Some(endpoints) = &provider.endpoints {
         let preferred = endpoints
@@ -396,6 +417,55 @@ fn ensure_supported_audio_file(input_path: &Path) -> Result<PathBuf, String> {
     }
 
     Ok(output_path)
+}
+
+fn prepare_transcription_audio_file(
+    input_path: &Path,
+    format: TranscriptionUploadFormat,
+) -> Result<PathBuf, String> {
+    if format.file_extension == "pcm" {
+        let extension = input_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if extension == "pcm" {
+            return Ok(input_path.to_path_buf());
+        }
+
+        let output_path = input_path.with_extension(format.file_extension);
+        let mut command = Command::new("ffmpeg");
+        with_augmented_path(&mut command);
+        let output = command
+            .args([
+                "-y",
+                "-i",
+                input_path.to_string_lossy().as_ref(),
+                "-vn",
+                "-f",
+                "s16le",
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                "16000",
+                "-ac",
+                "1",
+                output_path.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .map_err(|error| format!("Failed to run ffmpeg: {}", error))?;
+
+        if !output.status.success() {
+            return Err(format!(
+                "ffmpeg transcode failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+
+        return Ok(output_path);
+    }
+
+    ensure_supported_audio_file(input_path)
 }
 
 
@@ -549,9 +619,10 @@ pub async fn transcribe_audio_clip(
         payload.provider_id.as_deref(),
         payload.model_id.as_deref(),
     )?;
+    let upload_format = transcription_upload_format_for_provider(&target.provider_id);
 
     let (_temp_dir, input_path) = write_payload_to_temp_audio(&payload.audio_base64, &payload.mime_type)?;
-    let upload_path = ensure_supported_audio_file(&input_path)?;
+    let upload_path = prepare_transcription_audio_file(&input_path, upload_format)?;
     let upload_bytes = std::fs::read(&upload_path)
         .map_err(|error| format!("Failed to read prepared audio clip: {}", error))?;
     let upload_name = upload_path
@@ -567,7 +638,7 @@ pub async fn transcribe_audio_clip(
             "file",
             reqwest::multipart::Part::bytes(upload_bytes)
                 .file_name(upload_name)
-                .mime_str(output_content_type(&upload_path))
+                .mime_str(upload_format.content_type)
                 .map_err(|error| format!("Failed to build audio upload: {}", error))?,
         );
 
@@ -745,8 +816,8 @@ pub async fn run_claude_sdk_cmd(window: tauri::Window, payload: serde_json::Valu
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_transcription_target_from_hub_config, transcription_endpoint, HubMediaConfig,
-        ProviderConfig,
+        resolve_transcription_target_from_hub_config, transcription_endpoint,
+        transcription_upload_format_for_provider, HubMediaConfig, ProviderConfig,
     };
 
     #[test]
@@ -769,7 +840,7 @@ mod tests {
         ]))
         .expect("provider config should parse");
 
-        let target = resolve_transcription_target_from_providers(&providers, Some("volcengine"))
+        let target = resolve_transcription_target_from_hub_config(&providers, None, Some("volcengine"), None)
             .expect("transcription target should resolve");
 
         assert_eq!(target.provider_id, "volcengine");
@@ -842,6 +913,22 @@ mod tests {
 
         assert_eq!(target.provider_id, "bigmodel");
         assert_eq!(target.model, "glm-asr-2512");
+    }
+
+    #[test]
+    fn resolve_transcription_upload_format_prefers_pcm_for_volcengine() {
+        let format = transcription_upload_format_for_provider("volcengine");
+
+        assert_eq!(format.file_extension, "pcm");
+        assert_eq!(format.content_type, "audio/pcm");
+    }
+
+    #[test]
+    fn resolve_transcription_upload_format_defaults_to_mp3_for_other_providers() {
+        let format = transcription_upload_format_for_provider("bigmodel");
+
+        assert_eq!(format.file_extension, "mp3");
+        assert_eq!(format.content_type, "audio/mpeg");
     }
 }
 

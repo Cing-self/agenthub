@@ -38,6 +38,10 @@
     <key>NSAllowsArbitraryLoads</key>
     <true/>
   </dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>AgentHub 需要访问麦克风，把你的语音实时发送到本地桌面 Host。</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>AgentHub 需要访问本地网络，才能直接连接同一局域网里的桌面 Host 并传输语音媒体。</string>
   <key>UILaunchScreen</key>
   <dict/>
   <key>UISupportedInterfaceOrientations</key>

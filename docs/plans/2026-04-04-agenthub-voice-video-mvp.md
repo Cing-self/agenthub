@@ -267,6 +267,22 @@ git add src/pages/RemoteHostsPage.tsx ios-app/README.md docs/plans/2026-04-04-ag
 git commit -m "docs: add voice smoke test checklist"
 ```
 
+## Current Status (April 5, 2026)
+
+The voice MVP vertical slice is now implemented through Task 5:
+
+- relay call contracts and signaling are present
+- the desktop gateway owns one active voice call and realtime provider session
+- iOS can start/end calls, stream audio over the local realtime WebSocket, and keep text chat state intact
+- the desktop `Remote Hosts` page surfaces active call state plus realtime provider diagnostics
+- final transcript and assistant reply text persist back into the bound AgentHub thread
+
+The remaining work in this document is still Phase 2:
+
+- camera-share / sampled-frame video understanding in Task 6
+
+For the current voice smoke-test path, see `docs/plans/2026-04-04-agenthub-voice-smoke-test.md`.
+
 ### Task 6: Phase-two video frame understanding scaffold
 
 **Files:**

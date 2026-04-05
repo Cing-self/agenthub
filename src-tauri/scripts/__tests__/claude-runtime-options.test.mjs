@@ -21,9 +21,35 @@ test("buildClaudeQueryOptions disables thinking for remote bridge chat turns", (
   assert.deepEqual(options.thinking, {
     type: "disabled",
   });
-  assert.equal(options.systemPrompt.type, "preset");
-  assert.equal(options.systemPrompt.preset, "claude_code");
-  assert.match(options.systemPrompt.append, /Relay Demo Session/);
+  assert.deepEqual(
+    options.tools,
+    [],
+    "plain-chat turns should not expose Claude Code built-in tools",
+  );
+  assert.equal(typeof options.systemPrompt, "string");
+  assert.match(options.systemPrompt, /Relay Demo Session/);
+  assert.match(options.systemPrompt, /external chat surface/);
+});
+
+test("buildClaudeQueryOptions keeps Claude Code tools for agenthub widget chat", () => {
+  const options = buildClaudeQueryOptions({
+    payload: {
+      prompt: "Inspect the current repository",
+      agentName: "dolphin",
+      outputSurface: "agenthub-chat",
+    },
+    bundle: {
+      thread: {
+        title: "Desktop Agent Chat",
+      },
+    },
+    agenthubServer: { name: "agenthub-test" },
+  });
+
+  assert.deepEqual(options.tools, {
+    type: "preset",
+    preset: "claude_code",
+  });
 });
 
 test("buildClaudeQueryOptions ignores inherited Anthropic overrides for claude-subscription auth", () => {

@@ -67,6 +67,7 @@ interface RelayAgentStatus {
   lastError: string | null;
   mediaDefaults: RelayMediaConfig | null;
   activeCall: RelayActiveCallSummary | null;
+  activeVoiceSession: RelayActiveVoiceSession | null;
   logPath: string;
 }
 
@@ -90,6 +91,45 @@ interface RelayActiveCallSummary {
   createdAt: string;
   updatedAt: string;
   mediaConfig: RelayMediaConfig | null;
+}
+
+interface RelayEndpointSummary {
+  baseUrl: string;
+  apiType: string;
+}
+
+interface RelayActiveVoiceSession {
+  providerId: string;
+  modelId: string | null;
+  endpoint: RelayEndpointSummary | null;
+  status: "ready" | "blocked" | "streaming" | "ended" | "failed" | string;
+  ready: boolean;
+  missing: string[];
+  hasAppId: boolean;
+  hasAppKey: boolean;
+  hasToken: boolean;
+  hasResourceId: boolean;
+  startedAt: string | null;
+  lastChunkAt: string | null;
+  endedAt: string | null;
+  receivedChunks: number;
+  receivedBytes: number;
+  sampleRateHz: number | null;
+  channels: number | null;
+  providerState: RelayVoiceProviderState | null;
+}
+
+interface RelayVoiceProviderState {
+  status: string;
+  lastEvent: number | null;
+  inputAudioChunks: number;
+  inputAudioBytes: number;
+  outputAudioBytes: number;
+  userTranscript: string | null;
+  assistantText: string | null;
+  eventsReceived: number;
+  lastError: string | null;
+  sessionId: string | null;
 }
 
 interface RelayPairingInvite {
@@ -615,6 +655,86 @@ export default function RemoteHostsPage() {
             </div>
           )}
 
+          {relayStatus?.activeVoiceSession && (
+            <div className="rounded-xl border border-sky-500/20 bg-sky-500/5 px-3 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-sky-700/90">
+                    Realtime Voice Session
+                  </div>
+                  <div className="mt-1 text-[13px] font-medium text-foreground">
+                    {relayStatus.activeVoiceSession.providerId}
+                    {relayStatus.activeVoiceSession.modelId ? ` · ${relayStatus.activeVoiceSession.modelId}` : ""}
+                  </div>
+                </div>
+                <div className={cn(
+                  "rounded-full px-2.5 py-1 text-[11px]",
+                  relayStatus.activeVoiceSession.ready
+                    ? "bg-sky-500/10 text-sky-700"
+                    : "bg-amber-500/10 text-amber-700",
+                )}>
+                  {relayStatus.activeVoiceSession.ready ? "ready" : "missing config"}
+                </div>
+              </div>
+              <div className="mt-3 space-y-1 text-[12px] text-muted-foreground">
+                {relayStatus.activeVoiceSession.endpoint && (
+                  <div>
+                    Endpoint：{relayStatus.activeVoiceSession.endpoint.baseUrl} · {relayStatus.activeVoiceSession.endpoint.apiType}
+                  </div>
+                )}
+                <div>
+                  凭据状态：App ID {relayStatus.activeVoiceSession.hasAppId ? "已配置" : "缺失"} · App Key {relayStatus.activeVoiceSession.hasAppKey ? "已配置" : "缺失"} · Token {relayStatus.activeVoiceSession.hasToken ? "已配置" : "缺失"} · Resource ID {relayStatus.activeVoiceSession.hasResourceId ? "已配置" : "缺失"}
+                </div>
+                <div>
+                  流状态：{relayStatus.activeVoiceSession.status} · Chunk {relayStatus.activeVoiceSession.receivedChunks} · Bytes {relayStatus.activeVoiceSession.receivedBytes}
+                </div>
+                {(relayStatus.activeVoiceSession.sampleRateHz || relayStatus.activeVoiceSession.channels) && (
+                  <div>
+                    音频规格：{relayStatus.activeVoiceSession.sampleRateHz ?? "?"} Hz · {relayStatus.activeVoiceSession.channels ?? "?"} ch
+                  </div>
+                )}
+                {relayStatus.activeVoiceSession.startedAt && (
+                  <div>会话启动：{new Date(relayStatus.activeVoiceSession.startedAt).toLocaleString("zh-CN")}</div>
+                )}
+                {relayStatus.activeVoiceSession.lastChunkAt && (
+                  <div>最近音频块：{new Date(relayStatus.activeVoiceSession.lastChunkAt).toLocaleString("zh-CN")}</div>
+                )}
+                {relayStatus.activeVoiceSession.providerState && (
+                  <div className="rounded-lg border border-sky-500/20 bg-sky-500/5 px-2.5 py-2 space-y-1">
+                    <div>
+                      Provider 状态：{relayStatus.activeVoiceSession.providerState.status}
+                      {relayStatus.activeVoiceSession.providerState.lastEvent != null
+                        ? ` · Event ${relayStatus.activeVoiceSession.providerState.lastEvent}`
+                        : ""}
+                      {relayStatus.activeVoiceSession.providerState.sessionId
+                        ? ` · Session ${relayStatus.activeVoiceSession.providerState.sessionId}`
+                        : ""}
+                    </div>
+                    <div>
+                      Provider I/O：上行 Chunk {relayStatus.activeVoiceSession.providerState.inputAudioChunks} · 上行 Bytes {relayStatus.activeVoiceSession.providerState.inputAudioBytes} · 下行音频 {relayStatus.activeVoiceSession.providerState.outputAudioBytes} Bytes · 事件 {relayStatus.activeVoiceSession.providerState.eventsReceived}
+                    </div>
+                    {relayStatus.activeVoiceSession.providerState.userTranscript && (
+                      <div>ASR：{relayStatus.activeVoiceSession.providerState.userTranscript}</div>
+                    )}
+                    {relayStatus.activeVoiceSession.providerState.assistantText && (
+                      <div>回复：{relayStatus.activeVoiceSession.providerState.assistantText}</div>
+                    )}
+                    {relayStatus.activeVoiceSession.providerState.lastError && (
+                      <div className="text-red-500/90">
+                        Provider 错误：{relayStatus.activeVoiceSession.providerState.lastError}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {relayStatus.activeVoiceSession.missing.length > 0 && (
+                  <div className="text-amber-700/90">
+                    缺失项：{relayStatus.activeVoiceSession.missing.join("、")}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {(relayStatus?.connectedAt || relayStatus?.lastSyncAt || relayStatus?.lastError) && (
             <div className="rounded-xl border border-border/60 bg-background/50 px-3 py-3 text-[12px] text-muted-foreground space-y-1">
               {relayStatus?.connectedAt && <div>连接建立：{new Date(relayStatus.connectedAt).toLocaleString("zh-CN")}</div>}
@@ -862,6 +982,11 @@ export default function RemoteHostsPage() {
               </button>
             </div>
             <div className="rounded-xl border border-border/60 bg-background/60 px-3 py-3">
+              {(bridgeLog?.logPath || relayStatus?.logPath || bridgeStatus?.logPath) && (
+                <div className="mb-2 text-[11px] text-muted-foreground break-all">
+                  路径：{bridgeLog?.logPath || relayStatus?.logPath || bridgeStatus?.logPath}
+                </div>
+              )}
               <pre className="max-h-52 overflow-auto whitespace-pre-wrap break-words text-[11px] leading-5 text-foreground/85">
                 {bridgeLog?.lines?.length ? bridgeLog.lines.join("\n") : "暂无日志"}
               </pre>

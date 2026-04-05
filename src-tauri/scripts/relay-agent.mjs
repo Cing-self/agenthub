@@ -76,7 +76,9 @@ export function extractRelayMediaDefaults(hub) {
 
   return normalizeMediaConfig(
     {
-      voice: normalizeConfiguredModelSelection(media.voice, "asrProviderId", "asrModelId"),
+      voice:
+        normalizeConfiguredModelSelection(media.voice, "realtimeProviderId", "realtimeModelId")
+        ?? normalizeConfiguredModelSelection(media.voice, "asrProviderId", "asrModelId"),
       video: normalizeConfiguredModelSelection(
         media.video,
         "reasoningProviderId",

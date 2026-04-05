@@ -480,6 +480,13 @@ function buildUiPrompt(payload) {
 }
 
 export function buildClaudeQueryOptions({ payload, bundle, agenthubServer }) {
+  const outputSurface =
+    payload?.outputSurface === "plain-chat" ? "plain-chat" : "agenthub-chat";
+  const uiPrompt = buildUiPrompt({
+    threadTitle: bundle?.thread?.title,
+    agentName: payload.agentName,
+    outputSurface,
+  });
   const env = {
     ...process.env,
     CLAUDE_AGENT_SDK_CLIENT_APP: "agenthub/0.1.0",
@@ -494,10 +501,13 @@ export function buildClaudeQueryOptions({ payload, bundle, agenthubServer }) {
   return {
     cwd: payload.cwd || process.cwd(),
     model: payload.model || undefined,
-    tools: {
-      type: "preset",
-      preset: "claude_code",
-    },
+    tools:
+      payload.outputSurface === "plain-chat"
+        ? []
+        : {
+            type: "preset",
+            preset: "claude_code",
+          },
     permissionMode: "bypassPermissions",
     allowDangerouslySkipPermissions: true,
     maxTurns: payload.maxTurns || 10,
@@ -507,15 +517,14 @@ export function buildClaudeQueryOptions({ payload, bundle, agenthubServer }) {
     thinking: {
       type: "disabled",
     },
-    systemPrompt: {
-      type: "preset",
-      preset: "claude_code",
-      append: buildUiPrompt({
-        threadTitle: bundle?.thread?.title,
-        agentName: payload.agentName,
-        outputSurface: payload.outputSurface,
-      }),
-    },
+    systemPrompt:
+      outputSurface === "plain-chat"
+        ? uiPrompt
+        : {
+            type: "preset",
+            preset: "claude_code",
+            append: uiPrompt,
+          },
     mcpServers: {
       agenthub: agenthubServer,
     },

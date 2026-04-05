@@ -79,6 +79,34 @@ test("extractRelayMediaDefaults maps hub media config into relay media defaults"
   });
 });
 
+test("extractRelayMediaDefaults prefers realtime voice selection over ASR fallback", () => {
+  const mediaDefaults = extractRelayMediaDefaults({
+    media: {
+      voice: {
+        asrProviderId: "volcengine",
+        asrModelId: "doubao-realtime-asr",
+        realtimeProviderId: "volcengine",
+        realtimeModelId: "doubao-realtime-voice",
+      },
+      video: {
+        reasoningProviderId: "googleapis",
+        reasoningModelId: "gemini-2.5-flash",
+      },
+    },
+  });
+
+  assert.deepEqual(mediaDefaults, {
+    voice: {
+      providerId: "volcengine",
+      modelId: "doubao-realtime-voice",
+    },
+    video: {
+      providerId: "googleapis",
+      modelId: "gemini-2.5-flash",
+    },
+  });
+});
+
 test("buildSessionSnapshotPayload maps collaboration threads into relay sessions", () => {
   const payload = buildSessionSnapshotPayload({
     hostId: "host_123",

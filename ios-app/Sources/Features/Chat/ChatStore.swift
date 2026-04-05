@@ -3,6 +3,38 @@ import Combine
 
 @MainActor
 final class ChatStore {
+    enum MicrophonePermissionPrompt: Equatable {
+        case needsRequest
+        case denied
+
+        var title: String {
+            switch self {
+            case .needsRequest:
+                return "语音通话需要麦克风"
+            case .denied:
+                return "麦克风权限未开启"
+            }
+        }
+
+        var message: String {
+            switch self {
+            case .needsRequest:
+                return "先授权麦克风，手机才能把你的语音实时发给桌面端 Host。"
+            case .denied:
+                return "AgentHub 现在没有麦克风权限。点一下跳到系统设置，打开后再回来拨号。"
+            }
+        }
+
+        var actionTitle: String {
+            switch self {
+            case .needsRequest:
+                return "启用麦克风"
+            case .denied:
+                return "打开设置"
+            }
+        }
+    }
+
     struct PendingDirectMessage: Equatable {
         let bucketId: String
         let message: BridgeMessage
@@ -30,15 +62,25 @@ final class ChatStore {
     @Published var isSending = false
     @Published var isShowingHistory = false
     @Published var isShowingConnectionSheet = false
+    @Published var microphonePermissionPrompt: MicrophonePermissionPrompt?
 
     private let configStore = BridgeConfigStore()
+    private let relayCallAudioStreamer: RelayCallAudioStreaming
+    private let callConnectedCuePlayer: CallConnectedCuePlaying
     private let debugAutoRelayMessageKey = "lobster-mobile.debug-auto-relay-message"
     private let draftThreadBucketId = "__draft__"
     private var connectionAttemptGate = ConnectionAttemptGate()
     private var relayCallWatchTask: Task<Void, Never>?
+    private var activeRelayAudioCallId: String?
 
-    init() {
+    init(
+        relayCallAudioStreamer: RelayCallAudioStreaming = LiveRelayCallAudioStreamer(),
+        callConnectedCuePlayer: CallConnectedCuePlaying = LiveCallConnectedCuePlayer()
+    ) {
+        self.relayCallAudioStreamer = relayCallAudioStreamer
+        self.callConnectedCuePlayer = callConnectedCuePlayer
         let storedConfig = configStore.load()
+        storeVoiceDiagnosticsEnabled(storedConfig.voiceDiagnostics.enabled)
         self.connectionConfig = storedConfig
         if let relay = storedConfig.relay {
             self.relayWorkspace = RelayWorkspaceState(
@@ -52,6 +94,10 @@ final class ChatStore {
         }
 
         self.isShowingConnectionSheet = storedConfig.relay == nil && storedConfig.directBridge.token.isEmpty
+        self.microphonePermissionPrompt = ChatStore.permissionPrompt(for: currentVoiceMicrophonePermissionState())
+        appendVoiceDebugLog(
+            "chatstore:init voice-permission=\(voiceMicrophonePermissionStateDebugName(currentVoiceMicrophonePermissionState()))"
+        )
     }
 
     var isRelayMode: Bool {
@@ -103,11 +149,46 @@ final class ChatStore {
     }
 
     func connect() async {
+        refreshMicrophonePermissionPrompt()
         switch connectionConfig.preferredMode {
         case .relay:
             await connectRelay()
         case .direct:
             await connectDirect()
+        }
+    }
+
+    func refreshMicrophonePermissionPrompt() {
+        let state = currentVoiceMicrophonePermissionState()
+        appendVoiceDebugLog("chatstore:refresh-voice-permission state=\(voiceMicrophonePermissionStateDebugName(state))")
+        microphonePermissionPrompt = ChatStore.permissionPrompt(for: state)
+    }
+
+    func primeMicrophonePermissionPromptIfNeeded() async {
+        let state = currentVoiceMicrophonePermissionState()
+        appendVoiceDebugLog("chatstore:prime-voice-permission state=\(voiceMicrophonePermissionStateDebugName(state))")
+        guard shouldAutoRequestVoiceMicrophonePermission(for: state) else {
+            microphonePermissionPrompt = ChatStore.permissionPrompt(for: state)
+            return
+        }
+
+        let resolved = await requestVoiceMicrophonePermission()
+        appendVoiceDebugLog("chatstore:prime-voice-permission resolved=\(voiceMicrophonePermissionStateDebugName(resolved))")
+        microphonePermissionPrompt = ChatStore.permissionPrompt(for: resolved)
+    }
+
+    func resolveMicrophonePermissionPromptAction() async {
+        switch microphonePermissionPrompt {
+        case .needsRequest:
+            let state = await requestVoiceMicrophonePermission()
+            microphonePermissionPrompt = ChatStore.permissionPrompt(for: state)
+            if state == .denied {
+                connectionState = .failed("请在 iPhone 设置里允许 AgentHub 使用麦克风。")
+            }
+        case .denied:
+            openVoiceMicrophoneSettings()
+        case .none:
+            break
         }
     }
 
@@ -145,15 +226,17 @@ final class ChatStore {
 
         do {
             let payload = try RelayPairingPayload.parse(from: input)
+            stageDirectBridgeFallback(from: payload)
             let clientId = connectionConfig.relay?.clientId ?? "ios-\(UUID().uuidString.lowercased())"
             let claimedAt = ISO8601DateFormatter().string(from: Date())
             let client = RelayClient(relayBaseURL: payload.relayBaseURL)
 
-            _ = try await client.claimInvite(
+            let pairing = try await client.claimInvite(
                 code: payload.code,
                 clientId: clientId,
                 claimedAt: claimedAt
             )
+            stageDirectBridgeFallback(from: pairing)
             guard connectionAttemptGate.isCurrent(attempt) else {
                 return
             }
@@ -168,6 +251,9 @@ final class ChatStore {
             await connectRelay(preferredHostId: payload.hostId, attempt: attempt)
         } catch {
             guard connectionAttemptGate.isCurrent(attempt) else {
+                return
+            }
+            if await attemptDirectBridgeFallback(after: error) {
                 return
             }
             connectionStage = nil
@@ -241,6 +327,9 @@ final class ChatStore {
             guard connectionAttemptGate.isCurrent(activeAttempt) else {
                 return
             }
+            if await attemptDirectBridgeFallback(after: error) {
+                return
+            }
             connectionStage = nil
             connectionState = .failed(error.localizedDescription)
             isShowingConnectionSheet = true
@@ -254,6 +343,7 @@ final class ChatStore {
 
         relayCallWatchTask?.cancel()
         relayCallWatchTask = nil
+        await stopRelayCallAudioStreaming()
         workspace.selectHost(hostId)
         relayWorkspace = workspace
         persistConnectionConfig(preferredMode: .relay)
@@ -289,11 +379,18 @@ final class ChatStore {
         guard let workspace = relayWorkspace else {
             return
         }
+        refreshMicrophonePermissionPrompt()
+        guard await prepareMicrophonePermissionForVoiceCall() else {
+            return
+        }
+        appendVoiceDebugLog("chatstore:start-call requested selectedHost=\(workspace.selectedHostId ?? "nil") selectedSession=\(workspace.selectedSessionId ?? "nil")")
         guard currentRelayCall == nil else {
+            appendVoiceDebugLog("chatstore:start-call skipped reason=existing-call")
             return
         }
         guard let hostId = workspace.selectedHostId, let sessionId = workspace.selectedSessionId else {
             connectionState = .failed("请先选择一台 Host 和一个会话。")
+            appendVoiceDebugLog("chatstore:start-call failed reason=missing-selection")
             return
         }
 
@@ -309,6 +406,7 @@ final class ChatStore {
             applyRelayCall(call)
             watchRelayCall(call)
         } catch {
+            appendVoiceDebugLog("chatstore:start-call error=\(error.localizedDescription)")
             connectionState = .failed(error.localizedDescription)
         }
     }
@@ -328,6 +426,7 @@ final class ChatStore {
             if ended.state == .ended || ended.state == .failed {
                 relayCallWatchTask?.cancel()
                 relayCallWatchTask = nil
+                await stopRelayCallAudioStreaming()
             }
         } catch {
             connectionState = .failed(error.localizedDescription)
@@ -411,8 +510,64 @@ final class ChatStore {
         persistConnectionConfig(preferredMode: .direct)
     }
 
+    func setVoiceDiagnosticsEnabled(_ enabled: Bool) {
+        if enabled {
+            storeVoiceDiagnosticsEnabled(true)
+            connectionConfig.voiceDiagnostics.enabled = true
+            appendVoiceDebugLog("chatstore:voice-diagnostics enabled=true")
+        } else {
+            appendVoiceDebugLog("chatstore:voice-diagnostics enabled=false")
+            connectionConfig.voiceDiagnostics.enabled = false
+            storeVoiceDiagnosticsEnabled(false)
+        }
+        configStore.save(connectionConfig)
+    }
+
+    private func stageDirectBridgeFallback(from payload: RelayPairingPayload) {
+        stageDirectBridgeFallback(configs: payload.directBridgeConfigs)
+    }
+
+    private func stageDirectBridgeFallback(from pairing: RelayPairingClaim) {
+        stageDirectBridgeFallback(configs: pairing.directBridgeConfigs)
+    }
+
+    private func stageDirectBridgeFallback(configs: [BridgeConfig]) {
+        guard let preferred = configs.first else {
+            return
+        }
+        connectionConfig.directBridge.baseURL = preferred.baseURL
+        connectionConfig.directBridge.token = preferred.token
+        configStore.save(connectionConfig)
+    }
+
+    private func attemptDirectBridgeFallback(after error: Error) async -> Bool {
+        guard shouldFallbackToDirectBridge(error) else {
+            return false
+        }
+
+        guard !connectionConfig.directBridge.token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+
+        await connectDirect()
+        if case .connected = connectionState {
+            return true
+        }
+        return false
+    }
+
     private var directClient: BridgeClient {
         BridgeClient(config: connectionConfig.directBridge)
+    }
+
+    private func prepareMicrophonePermissionForVoiceCall() async -> Bool {
+        let state = await requestVoiceMicrophonePermission()
+        microphonePermissionPrompt = ChatStore.permissionPrompt(for: state)
+        guard state == .granted else {
+            connectionState = .failed("请先开启麦克风权限，再发起语音通话。")
+            return false
+        }
+        return true
     }
 
     private func consumeDebugAutoRelayMessage() -> String? {
@@ -512,6 +667,7 @@ final class ChatStore {
             )
         }
 
+        storeVoiceDiagnosticsEnabled(connectionConfig.voiceDiagnostics.enabled)
         configStore.save(connectionConfig)
     }
 
@@ -519,15 +675,25 @@ final class ChatStore {
         guard var workspace = relayWorkspace else {
             return
         }
+        appendVoiceDebugLog("chatstore:apply-call callId=\(call?.callId ?? "nil") state=\(call?.state.rawValue ?? "nil") mode=\(call?.mode.rawValue ?? "nil")")
+        let previousCall = workspace.selectedHost?.activeCall
         workspace.applyActiveCall(call)
         relayWorkspace = workspace
         persistConnectionConfig(preferredMode: .relay)
+        if shouldPlayCallConnectedCue(previous: previousCall, next: call) {
+            callConnectedCuePlayer.play()
+        }
     }
 
     private func watchRelayCall(_ call: RelayCallSummary) {
         relayCallWatchTask?.cancel()
         guard let workspace = relayWorkspace else {
             return
+        }
+        appendVoiceDebugLog("chatstore:watch-call callId=\(call.callId) state=\(call.state.rawValue)")
+
+        Task {
+            await syncRelayCallAudioStreaming(for: call)
         }
 
         relayCallWatchTask = Task { [weak self] in
@@ -540,16 +706,56 @@ final class ChatStore {
                         await MainActor.run {
                             self?.applyRelayCall(update)
                         }
+                        appendVoiceDebugLog("chatstore:call-update callId=\(update.callId) state=\(update.state.rawValue)")
+                        await self?.syncRelayCallAudioStreaming(for: update)
                     }
                 )
             } catch is CancellationError {
                 return
             } catch {
+                appendVoiceDebugLog("chatstore:watch-call error=\(error.localizedDescription)")
                 await MainActor.run {
                     self.connectionState = .failed(error.localizedDescription)
                 }
             }
         }
+    }
+
+    private func syncRelayCallAudioStreaming(for call: RelayCallSummary?) async {
+        appendVoiceDebugLog("chatstore:sync-audio callId=\(call?.callId ?? "nil") state=\(call?.state.rawValue ?? "nil") mode=\(call?.mode.rawValue ?? "nil") active=\(activeRelayAudioCallId ?? "nil")")
+        guard let call else {
+            await stopRelayCallAudioStreaming()
+            return
+        }
+
+        guard call.mode == .audio, call.state == .live else {
+            if activeRelayAudioCallId == call.callId {
+                await stopRelayCallAudioStreaming()
+            }
+            return
+        }
+
+        if activeRelayAudioCallId == call.callId {
+            return
+        }
+
+        do {
+            let bridgeConfig = try resolveRelayCallAudioIngress(connectionConfig)
+            appendVoiceDebugLog("chatstore:sync-audio resolved-baseURL=\(bridgeConfig.baseURL)")
+            _ = try await relayCallAudioStreamer.start(callId: call.callId, bridgeConfig: bridgeConfig)
+            activeRelayAudioCallId = call.callId
+            appendVoiceDebugLog("chatstore:sync-audio started callId=\(call.callId)")
+        } catch {
+            activeRelayAudioCallId = nil
+            appendVoiceDebugLog("chatstore:sync-audio error=\(error.localizedDescription)")
+            connectionState = .failed(error.localizedDescription)
+        }
+    }
+
+    private func stopRelayCallAudioStreaming() async {
+        activeRelayAudioCallId = nil
+        await relayCallAudioStreamer.stop()
+        appendVoiceDebugLog("chatstore:sync-audio stopped")
     }
 
     private var currentDirectBucketId: String {
@@ -561,6 +767,17 @@ final class ChatStore {
         connectionStage = stage
         connectionState = .connecting
         return attempt
+    }
+
+    private static func permissionPrompt(for state: VoiceMicrophonePermissionState) -> MicrophonePermissionPrompt? {
+        switch state {
+        case .granted:
+            return nil
+        case .needsRequest:
+            return .needsRequest
+        case .denied:
+            return .denied
+        }
     }
 }
 

@@ -30,7 +30,32 @@ func shouldRetryTransportError(_ error: Error) -> Bool {
     }
 }
 
-func mapTransportError(_ error: Error, serviceName: String) -> BridgeClientError {
+func isLikelyLocalNetworkHost(_ host: String?) -> Bool {
+    guard let normalizedHost = host?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+          !normalizedHost.isEmpty else {
+        return false
+    }
+
+    if normalizedHost == "localhost" || normalizedHost == "127.0.0.1" {
+        return true
+    }
+
+    if normalizedHost.hasPrefix("192.168.") || normalizedHost.hasPrefix("10.") || normalizedHost.hasPrefix("169.254.") {
+        return true
+    }
+
+    let octets = normalizedHost.split(separator: ".")
+    if octets.count == 4,
+       octets[0] == "172",
+       let second = Int(octets[1]),
+       (16 ... 31).contains(second) {
+        return true
+    }
+
+    return false
+}
+
+func mapTransportError(_ error: Error, serviceName: String, requestURL: URL? = nil) -> BridgeClientError {
     if let clientError = error as? BridgeClientError {
         return clientError
     }
@@ -43,6 +68,9 @@ func mapTransportError(_ error: Error, serviceName: String) -> BridgeClientError
     case .timedOut:
         return .server("\(serviceName) 请求超时，请确认桌面端在线后重试。")
     case .notConnectedToInternet, .networkConnectionLost:
+        if isLikelyLocalNetworkHost(requestURL?.host) {
+            return .server("当前无法访问这台 Mac 的本地语音桥。请确认 iPhone 与 Mac 在同一 Wi-Fi，并在系统设置里允许本地网络访问。")
+        }
         return .server("当前网络不可用，请检查手机网络后重试。")
     case .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed:
         return .server("\(serviceName) 地址无法连接，请检查入口地址。")
@@ -61,7 +89,7 @@ func performTransportRequest(_ request: URLRequest, serviceName: String) async t
             lastError = error
             let isLastAttempt = attempt == RelayTransportDefaults.maxRetryCount - 1
             guard shouldRetryTransportError(error), !isLastAttempt else {
-                throw mapTransportError(error, serviceName: serviceName)
+                throw mapTransportError(error, serviceName: serviceName, requestURL: request.url)
             }
 
             let delay = RelayTransportDefaults.retryBackoffNanoseconds * UInt64(attempt + 1)
@@ -69,7 +97,7 @@ func performTransportRequest(_ request: URLRequest, serviceName: String) async t
         }
     }
 
-    throw mapTransportError(lastError ?? URLError(.unknown), serviceName: serviceName)
+    throw mapTransportError(lastError ?? URLError(.unknown), serviceName: serviceName, requestURL: request.url)
 }
 
 struct BridgeClient {

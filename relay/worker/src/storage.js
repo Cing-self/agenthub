@@ -36,6 +36,7 @@ const D1_SCHEMA = [
     code TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
+    direct_bridge_json TEXT,
     claimed_at TEXT,
     claimed_by_client_id TEXT
   )`,
@@ -131,6 +132,7 @@ async function ensureD1Schema(storage) {
       const migrations = [
         `ALTER TABLE hosts ADD COLUMN media_defaults_json TEXT`,
         `ALTER TABLE relay_calls ADD COLUMN media_config_json TEXT`,
+        `ALTER TABLE pairing_invites ADD COLUMN direct_bridge_json TEXT`,
       ];
 
       for (const statement of migrations) {
@@ -176,6 +178,7 @@ function normalizeInviteRecord(invite) {
     code: requiredString(invite.code, "code"),
     createdAt: requiredString(invite.createdAt, "createdAt"),
     expiresAt: requiredString(invite.expiresAt, "expiresAt"),
+    directBridge: optionalObject(invite.directBridge),
     claimedAt: null,
     claimedByClientId: null,
   };
@@ -374,8 +377,8 @@ export async function createPairingInvite(storage, invite) {
     await storage.db
       .prepare(
         `INSERT INTO pairing_invites (
-          invite_id, host_id, code, created_at, expires_at, claimed_at, claimed_by_client_id
-        ) VALUES (?, ?, ?, ?, ?, NULL, NULL)`,
+          invite_id, host_id, code, created_at, expires_at, direct_bridge_json, claimed_at, claimed_by_client_id
+        ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)`,
       )
       .bind(
         record.inviteId,
@@ -383,6 +386,7 @@ export async function createPairingInvite(storage, invite) {
         record.code,
         record.createdAt,
         record.expiresAt,
+        record.directBridge ? JSON.stringify(record.directBridge) : null,
       )
       .run();
     return clone(record);
@@ -403,7 +407,7 @@ export async function claimPairingInvite(storage, { code, clientId, claimedAt })
     const invite = await storage.db
       .prepare(
         `SELECT invite_id AS inviteId, host_id AS hostId, code, created_at AS createdAt,
-                expires_at AS expiresAt, claimed_at AS claimedAt,
+                expires_at AS expiresAt, direct_bridge_json AS directBridgeJson, claimed_at AS claimedAt,
                 claimed_by_client_id AS claimedByClientId
          FROM pairing_invites
          WHERE code = ?`,
@@ -420,6 +424,7 @@ export async function claimPairingInvite(storage, { code, clientId, claimedAt })
           hostId: invite.hostId,
           clientId: normalizedClientId,
           claimedAt: invite.claimedAt,
+          directBridge: parseOptionalJson(invite.directBridgeJson),
         };
       }
       throw new Error("Pairing invite already claimed");
@@ -449,6 +454,7 @@ export async function claimPairingInvite(storage, { code, clientId, claimedAt })
       hostId: invite.hostId,
       clientId: normalizedClientId,
       claimedAt: normalizedClaimedAt,
+      directBridge: parseOptionalJson(invite.directBridgeJson),
     };
   }
 
@@ -462,6 +468,7 @@ export async function claimPairingInvite(storage, { code, clientId, claimedAt })
         hostId: invite.hostId,
         clientId: normalizedClientId,
         claimedAt: invite.claimedAt,
+        directBridge: invite.directBridge ? clone(invite.directBridge) : null,
       };
     }
     throw new Error("Pairing invite already claimed");
@@ -477,6 +484,7 @@ export async function claimPairingInvite(storage, { code, clientId, claimedAt })
     hostId: invite.hostId,
     clientId: normalizedClientId,
     claimedAt: normalizedClaimedAt,
+    directBridge: invite.directBridge ? clone(invite.directBridge) : null,
   };
   storage.pairings.push(pairing);
   return clone(pairing);

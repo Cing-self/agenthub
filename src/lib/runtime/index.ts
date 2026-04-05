@@ -202,6 +202,7 @@ const claudeCodeRuntime: RuntimeAdapter = {
         model: agent.runtime_profile?.default_model ?? null,
         requestId,
         enableGenerativeUi: agent.id === "dolphin",
+        outputSurface: "plain-chat",
         maxTurns: 12,
       },
     });
