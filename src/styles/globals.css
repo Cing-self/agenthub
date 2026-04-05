@@ -187,3 +187,31 @@ input, textarea {
   -webkit-backdrop-filter: blur(6px);
   border: 1px solid var(--border-soft);
 }
+
+@keyframes companion-breathe {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(-2px) scale(1.02);
+  }
+}
+
+@keyframes companion-soft-glow {
+  0%,
+  100% {
+    filter: drop-shadow(0 10px 20px rgba(96, 165, 250, 0.12));
+  }
+  50% {
+    filter: drop-shadow(0 16px 28px rgba(244, 63, 94, 0.2));
+  }
+}
+
+.companion-breathe {
+  animation: companion-breathe 4.8s ease-in-out infinite;
+}
+
+.companion-soft-glow {
+  animation: companion-soft-glow 2.8s ease-in-out infinite;
+}

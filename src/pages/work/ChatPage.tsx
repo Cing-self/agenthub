@@ -447,6 +447,7 @@ export default function ChatPage() {
 
   const requestedAgentId = searchParams.get("agent") ?? "";
   const requestedThreadId = searchParams.get("thread") ?? "";
+  const requestedDraft = searchParams.get("draft") ?? "";
   const activeAgents = agents.filter((item) => item.running);
   const visibleAgents = activeAgents.length > 0 ? activeAgents : agents;
 
@@ -495,6 +496,16 @@ export default function ChatPage() {
     if (storeSelectedThreadId === selectedThreadId && currentBundle?.thread.id === selectedThreadId) return;
     void selectThread(selectedThreadId);
   }, [currentBundle?.thread.id, selectThread, selectedThreadId, storeSelectedThreadId]);
+
+  useEffect(() => {
+    if (!requestedDraft) return;
+    setInput(requestedDraft);
+    inputRef.current?.focus();
+
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete("draft");
+    setSearchParams(nextParams, { replace: true });
+  }, [requestedDraft, searchParams, setSearchParams]);
 
   useEffect(() => {
     shouldStickToBottomRef.current = true;

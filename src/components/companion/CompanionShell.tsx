@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, Bot, CheckCircle2, ExternalLink, Loader2, X } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import type { TaskStatus, ThreadBundle } from "@/lib/types/collaboration";
@@ -239,6 +239,7 @@ export function CompanionShell() {
   const hasAttention = snapshot.status === "needs-you" || snapshot.status === "done";
   const previousStatusRef = useRef<CompanionStatus | null>(null);
   const bootstrappedThreadsRef = useRef(false);
+  const [quickDraft, setQuickDraft] = useState("");
 
   useEffect(() => {
     if (bootstrappedThreadsRef.current) return;
@@ -288,9 +289,43 @@ export function CompanionShell() {
   }, [hasAttention, open, snapshot.status]);
 
   const openWorkspace = () => {
-    if (location.pathname !== "/work/chat") {
-      navigate("/work/chat");
+    const params = new URLSearchParams();
+    if (currentBundle?.thread.id) {
+      params.set("thread", currentBundle.thread.id);
     }
+    if (currentBundle?.thread.primary_agent_id) {
+      params.set("agent", currentBundle.thread.primary_agent_id);
+    }
+
+    const search = params.toString();
+    if (location.pathname !== "/work/chat" || search) {
+      navigate({
+        pathname: "/work/chat",
+        search: search ? `?${search}` : "",
+      });
+    }
+    close();
+  };
+
+  const pushDraftToChat = () => {
+    const trimmed = quickDraft.trim();
+    const params = new URLSearchParams();
+
+    if (currentBundle?.thread.id) {
+      params.set("thread", currentBundle.thread.id);
+    }
+    if (currentBundle?.thread.primary_agent_id) {
+      params.set("agent", currentBundle.thread.primary_agent_id);
+    }
+    if (trimmed) {
+      params.set("draft", trimmed);
+    }
+
+    navigate({
+      pathname: "/work/chat",
+      search: `?${params.toString()}`,
+    });
+    setQuickDraft("");
     close();
   };
 
@@ -317,7 +352,9 @@ export function CompanionShell() {
           <div className={cn("pointer-events-none absolute inset-0 bg-gradient-to-br", meta.panelClassName)} aria-hidden />
 
           <div className="relative flex items-start gap-4 p-5">
-            <CatAvatar status={snapshot.status} />
+            <div className="companion-breathe">
+              <CatAvatar status={snapshot.status} />
+            </div>
 
             <div className="min-w-0 flex-1">
               <div className="flex items-start justify-between gap-3">
@@ -363,6 +400,33 @@ export function CompanionShell() {
                 </div>
               </div>
 
+              <div className="mt-3 rounded-[24px] border border-border/70 bg-background/[0.62] p-4">
+                <div className="text-[11px] uppercase tracking-[0.14em] text-muted-foreground">现在就交代一句</div>
+                <textarea
+                  value={quickDraft}
+                  onChange={(event) => setQuickDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                      event.preventDefault();
+                      pushDraftToChat();
+                    }
+                  }}
+                  placeholder="例如：帮我把今天这条线程收一下，列出还缺的点。"
+                  rows={3}
+                  className="mt-3 min-h-[84px] w-full resize-none rounded-[18px] border border-border/70 bg-background/[0.7] px-3 py-3 text-[13px] leading-6 text-foreground outline-none placeholder:text-muted-foreground"
+                />
+                <div className="mt-3 flex items-center justify-between gap-3">
+                  <div className="text-xs text-muted-foreground">⌘/Ctrl + Enter 可直接带进聊天框</div>
+                  <button
+                    type="button"
+                    onClick={pushDraftToChat}
+                    className="inline-flex h-10 items-center rounded-full bg-foreground px-4 text-sm font-medium text-background transition-transform hover:-translate-y-0.5"
+                  >
+                    带去继续聊
+                  </button>
+                </div>
+              </div>
+
               <div className="mt-4 flex items-center gap-2">
                 <button
                   type="button"
@@ -389,7 +453,7 @@ export function CompanionShell() {
           type="button"
           onClick={toggle}
           className={cn(
-            "pointer-events-auto group relative flex min-h-[88px] w-[294px] max-w-[calc(100vw-48px)] items-center gap-4 overflow-hidden rounded-[28px] border border-border/70 bg-card/[0.76] px-4 py-3 text-left shadow-[0_20px_72px_rgba(15,23,42,0.16)] backdrop-blur-2xl transition-all duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-0.5 hover:shadow-[0_28px_80px_rgba(15,23,42,0.2)]",
+            "pointer-events-auto group relative flex min-h-[90px] w-[306px] max-w-[calc(100vw-48px)] items-center gap-3 overflow-hidden rounded-[32px] border border-border/70 bg-card/[0.76] px-4 py-3 text-left shadow-[0_20px_72px_rgba(15,23,42,0.16)] backdrop-blur-2xl transition-all duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] hover:-translate-y-0.5 hover:shadow-[0_28px_80px_rgba(15,23,42,0.2)]",
             hasAttention && "ring-1 ring-primary/30",
             expanded && "translate-y-1 scale-[0.98] opacity-90",
           )}
@@ -397,8 +461,10 @@ export function CompanionShell() {
           aria-label="打开 Companion"
         >
           <div className={cn("pointer-events-none absolute inset-0 bg-gradient-to-br opacity-80", meta.panelClassName)} aria-hidden />
-          <div className="relative flex items-center gap-4">
-            <CatAvatar status={snapshot.status} />
+          <div className="relative flex items-center gap-3">
+            <div className={cn("rounded-[26px] p-1.5", hasAttention && "companion-soft-glow", !hasAttention && "companion-breathe")}>
+              <CatAvatar status={snapshot.status} />
+            </div>
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <span className={cn("inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium", meta.chipClassName)}>
@@ -416,7 +482,7 @@ export function CompanionShell() {
             </div>
           </div>
 
-          <div className="relative ml-auto shrink-0 rounded-full border border-border/70 bg-background/[0.65] px-2.5 py-1 text-[11px] font-medium text-muted-foreground">
+          <div className="relative ml-auto shrink-0 self-end rounded-full border border-border/70 bg-background/[0.65] px-2.5 py-1 text-[11px] font-medium text-muted-foreground">
             {shortcutLabel}
           </div>
         </button>
