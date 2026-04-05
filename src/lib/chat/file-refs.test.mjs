@@ -20,9 +20,9 @@ test("filterMeaningfulFileRefs drops slash terms that are not real workspace pat
 test("filterMeaningfulFileRefs keeps deep absolute paths without file extensions", () => {
   assert.deepEqual(
     filterMeaningfulFileRefs([
-      "/Users/demo/agenthub/docs/plans",
+      "/Users/demo/agenthub/doc/modules",
       "/VPN/LAN",
     ]),
-    ["/Users/demo/agenthub/docs/plans"],
+    ["/Users/demo/agenthub/doc/modules"],
   );
 });

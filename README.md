@@ -1,142 +1,95 @@
 # AgentHub
 
-[中文说明](./docs/README.zh-CN.md)
+AgentHub 正在从一个偏重的桌面控制台，收敛成一个 `companion-first` 的 Agent 产品：
 
-[Platform Roadmap](./docs/platform-roadmap-2026-04-03.md)
+- 前台是一个极简、常驻、带陪伴感的桌面入口
+- 后台是任务执行、记忆、工具调用和配置控制系统
+- 大窗口 Console 只在配置、调试、深度审查时出现
 
-AgentHub is a local-first desktop console for managing and working with multiple AI agents.
+当前仓库里的桌面 App 仍然是主要工作台，但它不再是未来面向普通用户的最终形态。
 
-It combines:
+## 文档入口
 
-- a `Work` surface for chat, task threads, and agent handoff
-- a `Config` surface for models, memory, skills, MCP, secrets, CLI runtimes, and agent instances
-- a Tauri backend that bridges local runtimes such as OpenClaw, Claude-based agents, Codex, and other CLI tools
+新的产品文档统一放在根目录 [doc/README.md](./doc/README.md)。
 
-This repository is currently in active product iteration. The chat, memory, runtime abstraction, and first-pass generative UI path are already usable; some surrounding modules are still being filled in.
+建议阅读顺序：
 
-## Current Highlights
+1. [产品定义](./doc/product.md)
+2. [当前状态](./doc/status.md)
+3. [总体架构](./doc/architecture.md)
+4. [路线图](./doc/roadmap.md)
 
-- Multi-agent chat threads with a `primary agent` per thread
-- Runtime abstraction layer for different agent backends
-- Streaming chat support on the Claude-based `dolphin` runtime
-- Automatic conversation archival to a Memos-compatible memory backend
-- CodePilot-style generative UI via `show-widget`
-- Config pages for models, MCP servers, skills, secrets, memory, remote hosts, and CLI market
-- Local desktop app built with `React + Vite + Tauri`
+模块文档：
 
-## Tech Stack
+- [Companion 前台](./doc/modules/companion.md)
+- [Agent 系统](./doc/modules/agent-system.md)
+- [记忆系统](./doc/modules/memory.md)
+- [Channels 与 Remote](./doc/modules/channels-and-remote.md)
+- [Console 后台](./doc/modules/console.md)
 
-- Frontend: `React 18`, `TypeScript`, `Vite`, `Tailwind`
-- Desktop shell: `Tauri v2`
-- Backend: `Rust`
-- State: `Zustand`
-- Claude runtime integration: `@anthropic-ai/claude-agent-sdk`
+## 当前产品判断
 
-## Repository Structure
+现在最重要的产品主线不是“聊天”，而是：
+
+1. 用户交代任务
+2. Agent 持续执行
+3. 用户只在需要决策、审查或确认时被唤起
+4. 结果、过程和经验被沉淀为记忆
+
+文字、语音、文档、视频都只是任务入口，不应该各自长成一套独立产品。
+
+## 仓库结构
 
 ```text
-src/                     React app
-  components/            UI building blocks
-  lib/                   runtime, chat parsing, shared types
-  pages/                 Work and Config screens
-  stores/                Zustand stores
-
-src-tauri/               Tauri backend
-  src/commands/          Rust command handlers
-  scripts/               runtime bridge scripts
-
-web-control/             lightweight remote web client for the local bridge
+doc/                     产品文档和模块文档
+src/                     React 桌面前端
+src-tauri/               Tauri 后端和 runtime bridge
+ios-app/                 原生 iOS App
+relay/                   Relay / control plane
+web-control/             轻量远程 Web 验证入口
 ```
 
-## Run Locally
+## 本地运行
 
-### Prerequisites
+前置依赖：
 
 - Node.js 20+
 - Rust toolchain
-- Tauri prerequisites for macOS
+- macOS 下的 Tauri 运行依赖
 
-### Install
+安装依赖：
 
 ```bash
 npm install
 ```
 
-### Start desktop dev mode
+启动桌面开发版：
 
 ```bash
 npm run tauri dev
 ```
 
-### Type-check the frontend
+前端类型检查：
 
 ```bash
 npx tsc --noEmit
 ```
 
-### Check the Tauri backend
+检查 Tauri 后端：
 
 ```bash
 cd src-tauri
 cargo check
 ```
 
-## Product Model
+## 当前代码现实
 
-### Work
+仓库里已经有这些真实能力：
 
-The `Work` side is the main operating surface:
+- 线程式 Chat / Task / Collaboration 基线
+- 多 runtime 抽象和 `dolphin` 流式输出
+- Feishu gateway 首条完整外部入口
+- Remote bridge / relay / iOS 原生壳
+- 本地语音与 realtime voice 的实验性纵切
 
-- `Chat`: thread-based conversation with a selected agent
-- `Tasks`: thread task board view
-
-The current thread has a `primary agent`. Switching the active agent in chat also updates the thread owner.
-
-### Config
-
-The `Config` side manages the environment around those agents:
-
-- dashboard
-- models
-- CLI market
-- MCP servers
-- skills
-- secrets
-- memory
-- collaboration
-- remote hosts
-- agent instance settings
-
-## Memory
-
-AgentHub currently treats memory as an external middleware concern.
-
-- Every chat turn is automatically written to the configured Memos-compatible provider.
-- AgentHub itself does not try to be the long-term memory intelligence layer.
-- The `Memory` page is used to connect and inspect the provider.
-
-## Generative UI
-
-The current generative UI path is modeled after CodePilot:
-
-- the model decides whether UI is useful
-- it can emit fenced `show-widget` blocks
-- the frontend parses those blocks and renders them inside a sandboxed iframe
-
-At the moment, this path is only fully enabled on the `dolphin` runtime.
-
-## Current Limitations
-
-These areas are still incomplete:
-
-- `Work > Messages` is still a placeholder
-- `Work > Cron` is still a placeholder
-- `Remote Hosts` is closer to discovery/scanning than full remote control
-- `CLI Market` is still a curated built-in registry, not a full community marketplace
-- Generative UI is not yet rolled out across all runtimes
-
-## Notes
-
-- This project is local-first.
-- Some configuration and runtime state is stored under `~/.agenthub/`.
-- The current development branch includes active experiments around runtime adapters, memory orchestration, and Claude-driven UI rendering.
+但未来对普通用户可见的主产品，应该是一个极轻的桌面 companion，而不是今天这个重控制台。
