@@ -1016,6 +1016,95 @@ private func testSpeechActivityGateAllowsModerateSpeechLevels() async {
     )
 }
 
+private func testSpeechActivityGateCanFlushShortSilenceTailAfterSpeech() async {
+    let gate = RelayCallSpeechActivityGate(
+        callId: "call_voice_1",
+        activationThreshold: 0.013,
+        holdDurationMs: 400,
+        idleFlushChunkCount: 3
+    )
+    let silence = Data(repeating: 0, count: 2_400 * MemoryLayout<Int16>.size)
+    let tone = makeCallConnectedCuePCM16Mono(
+        sampleRateHz: 24_000,
+        durationMs: 160,
+        frequencyHz: 1_120
+    )
+    let start = Date(timeIntervalSince1970: 250)
+
+    let detectedVoice = await gate.shouldTransmit(audioData: tone, now: start)
+    assert(
+        detectedVoice,
+        "speech-like chunks should still open the gate before the silence tail logic runs"
+    )
+
+    let firstTailChunk = await gate.shouldTransmit(audioData: silence, now: start.addingTimeInterval(1.0))
+    let secondTailChunk = await gate.shouldTransmit(audioData: silence, now: start.addingTimeInterval(1.1))
+    let thirdTailChunk = await gate.shouldTransmit(audioData: silence, now: start.addingTimeInterval(1.2))
+    let droppedAfterTail = await gate.shouldTransmit(audioData: silence, now: start.addingTimeInterval(1.4))
+
+    assert(
+        firstTailChunk,
+        "the first post-speech silent chunk should still be forwarded so the provider can detect end-of-turn"
+    )
+    assert(
+        secondTailChunk,
+        "the silence tail should be long enough to cover a short provider VAD window"
+    )
+    assert(
+        thirdTailChunk,
+        "the configured silence tail length should be honored"
+    )
+    assert(
+        !droppedAfterTail,
+        "once the bounded silence tail is exhausted, later silent chunks should stop uploading again"
+    )
+}
+
+private func testSilentChunksDoNotReachVoiceUploadPath() async {
+    let gate = RelayCallSpeechActivityGate(
+        callId: "call_voice_1",
+        activationThreshold: 0.013,
+        holdDurationMs: 400
+    )
+    let silence = Data(repeating: 0, count: 2_400 * MemoryLayout<Int16>.size)
+    let start = Date(timeIntervalSince1970: 300)
+
+    let shouldUploadSilence = await shouldUploadRelayCallInputChunk(
+        audioData: silence,
+        speechActivityGate: gate,
+        now: start
+    )
+    assert(
+        !shouldUploadSilence,
+        "silent chunks should be dropped before they enter the upload path"
+    )
+
+    let tone = makeCallConnectedCuePCM16Mono(
+        sampleRateHz: 24_000,
+        durationMs: 160,
+        frequencyHz: 1_120
+    )
+    let shouldUploadSpeech = await shouldUploadRelayCallInputChunk(
+        audioData: tone,
+        speechActivityGate: gate,
+        now: start.addingTimeInterval(0.1)
+    )
+    assert(
+        shouldUploadSpeech,
+        "speech-like chunks should still reach the upload path"
+    )
+
+    let shouldUploadIdleSilence = await shouldUploadRelayCallInputChunk(
+        audioData: silence,
+        speechActivityGate: gate,
+        now: start.addingTimeInterval(1.0)
+    )
+    assert(
+        !shouldUploadIdleSilence,
+        "once the hold window expires, silence should stay out of the upload path"
+    )
+}
+
 private func testVoicePermissionHelpersUseExpectedStates() {
     assert(
         voiceMicrophonePermissionStateDebugName(.granted) == "granted",
@@ -1315,6 +1404,8 @@ struct RelayModelsTestsRunner {
         await testDuplexCoordinatorInvalidatesStaleUploadRevisions()
         await testSpeechActivityGateRequiresVoiceEnergyBeforeTransmit()
         await testSpeechActivityGateAllowsModerateSpeechLevels()
+        await testSpeechActivityGateCanFlushShortSilenceTailAfterSpeech()
+        await testSilentChunksDoNotReachVoiceUploadPath()
         testVoicePermissionHelpersUseExpectedStates()
         testVoiceDebugConsoleLineUsesStablePrefix()
         testBridgeConfigStorePersistsVoiceDiagnosticsPreference()

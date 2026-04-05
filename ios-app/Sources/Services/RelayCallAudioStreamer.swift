@@ -515,21 +515,26 @@ actor RelayCallSpeechActivityGate {
     private let callId: String
     private let activationThreshold: Double
     private let holdDurationMs: Int
+    private let idleFlushChunkCount: Int
     private var activeUntil: Date?
     private var lastStateWasActive = false
+    private var pendingIdleFlushChunks = 0
 
     init(
         callId: String,
         activationThreshold: Double = 0.0065,
-        holdDurationMs: Int = 520
+        holdDurationMs: Int = 520,
+        idleFlushChunkCount: Int = 0
     ) {
         self.callId = callId
         self.activationThreshold = activationThreshold
         self.holdDurationMs = holdDurationMs
+        self.idleFlushChunkCount = max(idleFlushChunkCount, 0)
     }
 
     func reset(reason: String) {
         activeUntil = nil
+        pendingIdleFlushChunks = 0
         if lastStateWasActive {
             appendVoiceDebugLog("voice-activity:reset callId=\(callId) reason=\(reason)")
         }
@@ -540,6 +545,7 @@ actor RelayCallSpeechActivityGate {
         let rms = normalizedPCM16MonoRMS(audioData: audioData)
         if rms >= activationThreshold {
             activeUntil = now.addingTimeInterval(Double(holdDurationMs) / 1000.0)
+            pendingIdleFlushChunks = 0
             if !lastStateWasActive {
                 appendVoiceDebugLog(
                     "voice-activity:start callId=\(callId) rms=\(String(format: "%.4f", rms))"
@@ -557,10 +563,26 @@ actor RelayCallSpeechActivityGate {
             appendVoiceDebugLog(
                 "voice-activity:idle callId=\(callId) rms=\(String(format: "%.4f", rms))"
             )
+            lastStateWasActive = false
+            pendingIdleFlushChunks = max(idleFlushChunkCount - 1, 0)
+            return idleFlushChunkCount > 0
         }
+
         lastStateWasActive = false
+        if pendingIdleFlushChunks > 0 {
+            pendingIdleFlushChunks -= 1
+            return true
+        }
         return false
     }
+}
+
+func shouldUploadRelayCallInputChunk(
+    audioData: Data,
+    speechActivityGate: RelayCallSpeechActivityGate,
+    now: Date = Date()
+) async -> Bool {
+    await speechActivityGate.shouldTransmit(audioData: audioData, now: now)
 }
 
 #if os(iOS)
@@ -694,7 +716,10 @@ final class LiveRelayCallAudioStreamer: RelayCallAudioStreaming {
             }
         )
         let duplexCoordinator = RelayCallDuplexCoordinator(callId: callId)
-        let speechActivityGate = RelayCallSpeechActivityGate(callId: callId)
+        let speechActivityGate = RelayCallSpeechActivityGate(
+            callId: callId,
+            idleFlushChunkCount: 6
+        )
         let playbackFormat = Self.makePlaybackFormat(sampleRateHz: 24_000, channels: 1)
 
         engine.attach(player)
@@ -717,7 +742,12 @@ final class LiveRelayCallAudioStreamer: RelayCallAudioStreaming {
                 guard await duplexCoordinator.shouldUploadInputChunk() else {
                     return
                 }
-                _ = await speechActivityGate.shouldTransmit(audioData: normalized)
+                guard await shouldUploadRelayCallInputChunk(
+                    audioData: normalized,
+                    speechActivityGate: speechActivityGate
+                ) else {
+                    return
+                }
                 await self.uploadCoordinator?.upload(
                     data: normalized,
                     mimeType: "audio/pcm",

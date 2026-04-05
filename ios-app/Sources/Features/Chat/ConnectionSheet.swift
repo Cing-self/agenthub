@@ -288,7 +288,7 @@ private struct ConnectionNotesCard: View {
             Text("What this connection is for")
                 .font(.system(size: 18, weight: .semibold))
 
-            Text("This app talks to the remote control contract directly. Pairing gets you hosts and sessions first. Voice, approvals, and media will ride on the same connection model later.")
+            Text("This app pairs through relay for hosts and sessions, and already supports realtime voice calls through the paired desktop host. The same connection model also carries diagnostics and remote control actions.")
                 .font(.system(size: 14))
                 .foregroundStyle(ChatChromePresentation.secondaryTextColor)
         }
