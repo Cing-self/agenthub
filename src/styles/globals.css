@@ -116,6 +116,12 @@ body {
   background-color: var(--window-bg);
 }
 
+html.companion-surface,
+body.companion-surface,
+body.companion-surface #root {
+  background: transparent !important;
+}
+
 /* ── Scrollbar: fully hidden ── */
 * {
   scrollbar-width: none;

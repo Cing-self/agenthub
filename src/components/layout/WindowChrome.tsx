@@ -1,7 +1,8 @@
 import type { CSSProperties } from "react";
 import { useMemo } from "react";
 import { useLocation } from "react-router-dom";
-import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { Bot, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { openCompanionWindow } from "@/lib/companion/window";
 import { useCollaborationStore } from "@/stores/collaboration-store";
 import { useModeStore } from "@/stores/mode-store";
 
@@ -41,6 +42,12 @@ export function WindowChrome() {
 
   const sidebarRailWidth = sidebarCollapsed ? 114 : 228;
   const chromeStyle = { "--sidebar-rail-width": `${sidebarRailWidth}px` } as CSSProperties;
+  const openDesktopCompanion = () => {
+    void openCompanionWindow({
+      threadId: currentBundle?.thread.id ?? null,
+      agentId: currentBundle?.thread.primary_agent_id ?? null,
+    });
+  };
 
   return (
     <header
@@ -78,15 +85,26 @@ export function WindowChrome() {
             className="relative flex w-full"
             style={{ justifyContent: sidebarCollapsed ? "center" : "flex-end" }}
           >
-          <button
-            type="button"
-            onClick={() => toggleSidebarCollapsed()}
-            className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-transparent text-muted-foreground transition-colors hover:bg-foreground/[0.045] hover:text-foreground"
-            style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
-            title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
-          >
-            {sidebarCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
-          </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={openDesktopCompanion}
+                className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-transparent text-muted-foreground transition-colors hover:bg-foreground/[0.045] hover:text-foreground"
+                style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
+                title="打开桌面 Companion"
+              >
+                <Bot size={15} />
+              </button>
+              <button
+                type="button"
+                onClick={() => toggleSidebarCollapsed()}
+                className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-transparent text-muted-foreground transition-colors hover:bg-foreground/[0.045] hover:text-foreground"
+                style={{ WebkitAppRegion: "no-drag" } as CSSProperties}
+                title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
+              >
+                {sidebarCollapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}
+              </button>
+            </div>
           </div>
         </div>
 

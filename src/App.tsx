@@ -1,10 +1,12 @@
 import { useEffect } from "react";
-import { Routes, Route, Navigate, useLocation } from "react-router-dom";
+import { Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { Toaster } from "sonner";
 import { toast } from "sonner";
 import { CompanionShell } from "./components/companion/CompanionShell";
+import { CompanionWindow } from "./components/companion/CompanionWindow";
 import { Sidebar } from "./components/layout/Sidebar";
 import { WindowChrome } from "./components/layout/WindowChrome";
+import { COMPANION_NAVIGATE_EVENT } from "./lib/companion/window";
 import { useThemeStore } from "./stores/theme-store";
 import { ErrorBoundary } from "./components/shared/ErrorBoundary";
 
@@ -36,9 +38,14 @@ import type { CronJob } from "./lib/types/cron";
 function App() {
   const { theme } = useThemeStore();
   const location = useLocation();
+  const navigate = useNavigate();
   const chatOwnsScroll = location.pathname === "/work/chat";
+  const surface = new URLSearchParams(location.search).get("surface");
+  const isCompanionSurface = surface === "companion";
 
   useEffect(() => {
+    if (isCompanionSurface) return;
+
     let disposed = false;
 
     const poll = async () => {
@@ -66,7 +73,68 @@ function App() {
       disposed = true;
       window.clearInterval(timer);
     };
-  }, []);
+  }, [isCompanionSurface]);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle("companion-surface", isCompanionSurface);
+    document.body.classList.toggle("companion-surface", isCompanionSurface);
+
+    return () => {
+      document.documentElement.classList.remove("companion-surface");
+      document.body.classList.remove("companion-surface");
+    };
+  }, [isCompanionSurface]);
+
+  useEffect(() => {
+    if (isCompanionSurface) return;
+
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    void import("@tauri-apps/api/webviewWindow")
+      .then(({ getCurrentWebviewWindow }) =>
+        getCurrentWebviewWindow().listen<{
+          path: string;
+          query?: Record<string, string | null | undefined>;
+        }>(COMPANION_NAVIGATE_EVENT, (event) => {
+          if (disposed) return;
+
+          const params = new URLSearchParams();
+          Object.entries(event.payload.query ?? {}).forEach(([key, value]) => {
+            if (value) {
+              params.set(key, value);
+            }
+          });
+
+          navigate({
+            pathname: event.payload.path,
+            search: params.toString() ? `?${params.toString()}` : "",
+          });
+        }),
+      )
+      .then((dispose) => {
+        unlisten = dispose;
+      })
+      .catch((error) => {
+        if (!disposed) {
+          console.error("Failed to bind companion navigation listener:", error);
+        }
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [isCompanionSurface, navigate]);
+
+  if (isCompanionSurface) {
+    return (
+      <div className="h-screen w-screen overflow-hidden bg-transparent text-foreground">
+        <CompanionWindow />
+        <Toaster theme={theme} position="bottom-right" />
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen w-screen flex-col bg-background text-foreground">
